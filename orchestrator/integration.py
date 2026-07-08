@@ -226,9 +226,10 @@ def integrate_pr(
         sleeper=sleeper,
     )
     if checks.status == "pass":
-        summary = f"integrated PR #{pr_number} into {branch}; post-merge checks passed"
+        summary = f"integrated PR #{pr_number} into {branch}; post-merge checks passed; closed issue #{entry.issue_number}"
         _set_pr_label(github_client, config, pr_number, "integrated", remove=["integrating", "integration-failed"])
         _set_issue_state(github_client, config, entry.issue_number, "integrated")
+        _close_issue(github_client, config, entry.issue_number)
         update_run_entry(
             config,
             entry,
@@ -497,15 +498,15 @@ def build_daily_pr_body(config: ProjectConfig, branch: str, entries: list[RunLed
             "- [ ] `daily-integration` status is green.",
             "- [ ] Human approves the final PR to main.",
             "",
-            "## Closes",
+            "## Integrated Issues",
             "",
         ]
     )
     if integrated:
         for entry in integrated:
-            lines.append(f"Closes #{entry.issue_number}")
+            lines.append(f"- issue #{entry.issue_number} - closed after daily-branch integration")
     else:
-        lines.append("None")
+        lines.append("- none")
     return "\n".join(lines) + "\n"
 
 
@@ -571,6 +572,11 @@ def _set_issue_state(github_client: Any, config: ProjectConfig, issue_number: in
             label,
             remove=[item for item in LIFECYCLE_LABELS if item != label],
         )
+
+
+def _close_issue(github_client: Any, config: ProjectConfig, issue_number: int) -> None:
+    if hasattr(github_client, "close_issue"):
+        github_client.close_issue(config.repo, issue_number, reason="completed")
 
 
 def _notify_integration_failure(

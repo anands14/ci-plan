@@ -78,9 +78,10 @@ The private repo can stay private: agents run on the Mac, write only to an agent
 9. Approved? The reviewer classifies the PR as `clean` or `flagged`.
    The integration lane serially merges approved PRs into `day/YYYY-MM-DD`.
 10. After each merge into the daily branch, all configured post-merge checks run against the combined branch.
-    Pass -> mark the task `integrated` and advance the queue.
+    Pass -> mark the task `integrated`, close the GitHub issue as completed, and advance the queue.
     Fail -> revert the just-merged PR, label the task `integration-failed`, notify the owning agent with the failure cause, and ask it to fix and raise again.
 11. At the end of the day, raise one PR from the daily branch to `main`.
+    The daily PR lists already-closed integrated issues; it does not own issue closure.
     Clean included PRs are glance-review candidates; flagged included PRs require real human attention.
 
 ---
@@ -121,6 +122,8 @@ The private repo can stay private: agents run on the Mac, write only to an agent
 - **Post-merge bugs** are new tasks through the same gate.
   The reproduction becomes a permanent regression test.
   "The test is wrong" is the rare escalation, never the default the agent may assume.
+- **Final-PR findings** become new bug or follow-up issues unless the daily branch itself must be reverted.
+  The original task issue has already been closed when its PR survived daily-branch integration.
 
 ---
 

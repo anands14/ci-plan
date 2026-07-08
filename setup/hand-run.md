@@ -83,6 +83,7 @@ It produced PR [#8](https://github.com/anands14/tovi/pull/8), which is routed `a
    bin/orchestrator integrate-pr --project humanmind --issue <issue> --pr <N>
    ```
    This squash-merges the PR into `day/YYYY-MM-DD`, runs the post-merge branch checks, and reverts that PR if the daily branch turns red.
+   When the checks pass, the orchestrator marks the task `integrated` and closes the GitHub issue as completed.
    A reverted PR is commented with the breaking cause and sent back to the agent for repair.
 
 8. **Final daily PR.** At the end of the day, raise or update one PR from the daily branch to `main`.
@@ -92,6 +93,7 @@ It produced PR [#8](https://github.com/anands14/tovi/pull/8), which is routed `a
    ```
 
 9. **Post-merge.** A bug found later is a new task through this same loop; its repro becomes a permanent regression test.
+   A bug found during final daily PR review is handled the same way unless the daily branch itself must be reverted.
 
 ## Stuck, deferred, and escalation - never spin
 

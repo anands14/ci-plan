@@ -83,10 +83,12 @@ Mirrors CONSTITUTION.md section 3, and the test/check design settled for the fir
 12. **Daily integration.** The integration lane merges exactly one approved PR at a time into `day/YYYY-MM-DD`.
     It requires `gate`, `test-discipline`, `sim-validation`, and `review` to be green on the agent PR before the merge.
     After the merge, it waits for the configured post-merge branch checks on the daily branch.
-    If those checks pass, it marks the task `integrated`.
+    If those checks pass, it marks the task `integrated` and closes the GitHub issue as completed.
     If those checks fail, it reverts the just-merged PR, marks the task `integration-failed`, comments with the failure cause, and wakes the owning agent to fix and raise again.
 13. **Final daily PR.** At the end of day, the orchestrator opens or updates one PR from `day/YYYY-MM-DD` to the default branch and posts `daily-integration`.
+    The final PR lists already-integrated, already-closed issues rather than closing them.
     The human merges only this final PR.
+    If final review or merge-to-main reveals a problem, create a new bug or follow-up issue and route it through the same agent loop.
 
 ## Status posting & the merge gate (orchestrator-enforced)
 
@@ -98,7 +100,7 @@ In short:
   The required pre-integration contexts are `gate` (native CI job containing `format`, `analyze`, `test:fast`, and `backend-e2e`), `test-discipline`, plus `sim-validation` and `review` (**orchestrator-posted statuses**).
   The agent token cannot post statuses - the thing being judged never holds the pen.
 - `approved` plus `clean` or `flagged` puts the PR in the serialized daily integration queue.
-  The integration lane squash-merges into the daily branch, runs post-merge branch checks, and reverts the just-merged PR if the combined branch turns red.
+  The integration lane squash-merges into the daily branch, runs post-merge branch checks, closes the issue on success, and reverts the just-merged PR if the combined branch turns red.
 - The final PR from the daily branch to the default branch requires `gate`, `test-discipline`, and `daily-integration`.
   The human merges that final PR with **`merge <pr>`**, which refuses non-daily heads, wrong bases, missing contexts, red checks, or a changed head SHA.
 - The unattended preflight must fail if the worker can push directly to origin.

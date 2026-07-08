@@ -19,6 +19,7 @@ class FakeGitHub:
     def __init__(self, *, branch_checks=None):
         self.pr_labels = []
         self.issue_states = []
+        self.closed_issues = []
         self.comments = []
         self.branch_checks_value = branch_checks or {"gate": "pass", "test-discipline": "pass"}
         self.created_prs = []
@@ -58,6 +59,9 @@ class FakeGitHub:
 
     def set_state(self, repo, number, add, remove=None):
         self.issue_states.append((repo, number, add, remove or []))
+
+    def close_issue(self, repo, number, *, reason="completed"):
+        self.closed_issues.append((repo, number, reason))
 
     def comment_pr(self, repo, pr, body):
         self.comments.append(("pr", pr, body))
@@ -146,6 +150,7 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(updated.integration_status, "passed")
             self.assertIn(["gh", "pr", "merge", "42", "-R", "owner/sample", "--squash"], calls)
             self.assertIn(("owner/sample", 7, "integrated", ANY), fake_github.issue_states)
+            self.assertEqual(fake_github.closed_issues, [("owner/sample", 7, "completed")])
 
     def test_integrate_pr_reverts_and_notifies_when_branch_checks_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,6 +193,7 @@ class IntegrationTests(unittest.TestCase):
             self.assertTrue(result.reverted)
             self.assertEqual(updated.current_step, "integration-failed")
             self.assertEqual(updated.integration_status, "reverted")
+            self.assertEqual(fake_github.closed_issues, [])
             self.assertTrue(any(comment[0] == "pr" for comment in fake_github.comments))
 
     def test_open_daily_pr_builds_body_and_posts_attestation(self):
@@ -220,7 +226,9 @@ class IntegrationTests(unittest.TestCase):
             body = result.body_path.read_text(encoding="utf-8")
             self.assertEqual(result.status, "created")
             self.assertIn("Daily integration branch `day/2026-07-06` into `main`.", body)
-            self.assertIn("Closes #7", body)
+            self.assertIn("## Integrated Issues", body)
+            self.assertIn("- issue #7 - closed after daily-branch integration", body)
+            self.assertNotIn("Closes #7", body)
             self.assertIn("--context", calls[0])
             self.assertIn("daily-integration", calls[0])
 

@@ -39,6 +39,7 @@ For each task, an implementer agent writes code plus tests from the acceptance c
 Approved work is routed as `clean` or `flagged`, then a separate integration lane serially merges it into `day/YYYY-MM-DD`.
 After each daily-branch merge, the branch checks run on the combined branch.
 If they fail, the integration lane reverts the just-merged PR, comments with the breaking cause, and sends the task back for repair.
+If they pass, the integration lane marks the task integrated and closes the GitHub issue immediately.
 At the end of the day the orchestrator opens one PR from the daily branch to `main`; only the human approves and merges that final PR.
 The full mechanism, guardrails, and budget model are in [PLAN.md](PLAN.md).
 

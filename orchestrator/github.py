@@ -251,6 +251,10 @@ def comment_issue(repo: str, number: int, body: str) -> None:
     _gh(["issue", "comment", str(number), "--body", body], repo)
 
 
+def close_issue(repo: str, number: int, *, reason: str = "completed") -> None:
+    _gh(["issue", "close", str(number), "--reason", reason], repo)
+
+
 def comment_pr(repo: str, number: int, body: str) -> None:
     _gh(["pr", "comment", str(number), "--body", body], repo)
 
