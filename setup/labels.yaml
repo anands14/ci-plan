@@ -1,0 +1,66 @@
+# The label state machine. Provisioned onto each target repo at registration.
+# Labels are the public lifecycle state; the local run ledger stores operational state.
+# Resume after any crash or window gap reconciles both.
+
+# --- task lifecycle (mutually exclusive; a task carries exactly one) ---
+- name: ready
+  color: "0e8a16"
+  description: Strict spec contract passed and human/spec-review approved; eligible for the orchestrator to claim.
+- name: in-progress
+  color: fbca04
+  description: An agent is actively working this task.
+- name: in-review
+  color: "1d76db"
+  description: Green; the gating reviewer is reviewing (or changes are being addressed).
+- name: approved
+  color: "5319e7"
+  description: Reviewer approved; eligible for the serialized daily-branch integration queue.
+- name: integrated
+  color: "0e8a16"
+  description: Merged into the daily branch and passed post-merge checks.
+- name: integration-failed
+  color: b60205
+  description: Merged into the daily branch, broke post-merge checks, and was reverted for agent repair.
+- name: deferred
+  color: d4c5f9
+  description: Paused for window/fairness while progress is plausible; lease and local run state preserved.
+- name: stuck
+  color: b60205
+  description: Hit a true no-progress condition; a diagnostic artifact awaits the human's judgment.
+
+# --- routing / type ---
+- name: needs-human
+  color: e99695
+  description: Escalation - requires a human decision before it can proceed.
+- name: blocked
+  color: "5319e7"
+  description: Dependencies are not done or external input is missing; not eligible for worker claim.
+- name: bug
+  color: d93f0b
+  description: A post-merge defect; runs through the same gate as any task.
+- name: clean
+  color: c2e0c6
+  description: Reviewer-approved PR suitable for quick human validation and merge.
+- name: flagged
+  color: fbca04
+  description: Reviewer-approved PR that needs real human attention in the final daily PR.
+- name: integrating
+  color: "1d76db"
+  description: The integration agent is merging this PR into the daily branch.
+- name: deviation
+  color: fef2c0
+  description: This PR contains a declared, loud deviation from a convention - scrutinize it.
+- name: protected-path-override
+  color: c5def5
+  description: Human-applied override allowing a protected path edit in this PR.
+- name: test-discipline-override
+  color: c5def5
+  description: Human-applied override allowing a test deletion/skip change in this PR.
+
+# --- priority (optional, set during speccing) ---
+- name: p1
+  color: "000000"
+  description: Do first within a window (small-wins-first still applies among same priority).
+- name: p2
+  color: "555555"
+  description: Normal priority.

@@ -1,0 +1,24 @@
+# Reference clones (kept locally for reference, not part of the framework source).
+# Re-clone from github.com/kunchenguid/<name> if needed.
+/treehouse/
+/no-mistakes/
+/gnhf/
+/firstmate/
+
+# Per-project local overrides (the committed projects/<name>.yaml is the shared config).
+/projects/*.local.yaml
+
+# Scratch / OS
+.DS_Store
+*.log
+.claude/
+__pycache__/
+.pytest_cache/
+
+# Secrets - pipeline credentials live in .env, never committed.
+.env
+.env.*
+!.env.example
+
+# Local orchestrator runtime state.
+.orchestrator/

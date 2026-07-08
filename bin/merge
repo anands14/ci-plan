@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# merge - the final daily-PR merge gate (degraded model, no branch protection;
+# see setup/branch-protection.md). Run this INSTEAD of the web-UI Merge button:
+# it refuses unless this is the day-branch-to-main PR and every required check
+# is green.
+#
+# Why it exists: on a free private repo GitHub cannot enforce required checks,
+# so "only green final PRs reach main" is enforced here, locally, by the human's own gh.
+#
+# Usage: merge <pr> [--repo owner/name] [--base main] [--daily-prefix day/] [--dry-run]
+set -euo pipefail
+
+REPO="anands14/tovi"   # default: the first managed project
+# Check contexts that must be PRESENT and green on the final daily PR.
+# `daily-integration` is posted by the orchestrator after the serialized
+# day-branch queue has merged and verified every included agent PR.
+REQUIRED_CONTEXTS="gate test-discipline daily-integration"
+BASE="main"
+DAILY_PREFIX="day/"
+DRY_RUN=0
+PR=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) REPO="$2"; shift 2 ;;
+    --base) BASE="$2"; shift 2 ;;
+    --daily-prefix) DAILY_PREFIX="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) echo "usage: merge <pr> [--repo owner/name] [--base main] [--daily-prefix day/] [--dry-run]"; exit 0 ;;
+    *) PR="$1"; shift ;;
+  esac
+done
+[ -n "$PR" ] || { echo "usage: merge <pr> [--repo owner/name] [--base main] [--daily-prefix day/] [--dry-run]" >&2; exit 2; }
+
+echo "PR #$PR on $REPO:"
+pr_json="$(gh pr view "$PR" -R "$REPO" --json headRefOid,headRefName,baseRefName)"
+head_sha="$(printf '%s\n' "$pr_json" | jq -r .headRefOid)"
+head_branch="$(printf '%s\n' "$pr_json" | jq -r .headRefName)"
+base_branch="$(printf '%s\n' "$pr_json" | jq -r .baseRefName)"
+
+if [ "$base_branch" != "$BASE" ]; then
+  echo "REFUSED: final PR base is '$base_branch', expected '$BASE'." >&2
+  exit 1
+fi
+case "$head_branch" in
+  "$DAILY_PREFIX"*) ;;
+  *)
+    echo "REFUSED: final PR head '$head_branch' is not a daily branch with prefix '$DAILY_PREFIX'." >&2
+    exit 1
+    ;;
+esac
+
+checks_json="$(gh pr checks "$PR" -R "$REPO" --json name,bucket,state,link 2>/dev/null || true)"
+[ -n "$checks_json" ] && [ "$checks_json" != "[]" ] || {
+  echo "REFUSED: no checks found on the PR." >&2
+  exit 1
+}
+printf '%s\n' "$checks_json" |
+  jq -r '.[] | "  \(.name)\t\(.bucket)\t\(.state)"' |
+  awk -F'\t' '{printf "  %-22s %-8s %s\n", $1, $2, $3}'
+
+# Optional checks may be skipped, such as nightly jobs on a pull_request event.
+# Any pending, cancelled, or failing reported check still blocks the merge.
+if ! printf '%s\n' "$checks_json" | jq -e 'all(.[]; .bucket == "pass" or .bucket == "skipping")' >/dev/null; then
+  echo "REFUSED: a reported check is pending, cancelled, or failing above." >&2
+  exit 1
+fi
+
+# Required contexts must be present AND passing.
+for ctx in $REQUIRED_CONTEXTS; do
+  if ! printf '%s\n' "$checks_json" | jq -e --arg ctx "$ctx" 'any(.[]; .name == $ctx and .bucket == "pass")' >/dev/null; then
+    echo "REFUSED: required check '$ctx' is missing or not green." >&2
+    exit 1
+  fi
+done
+
+current_sha="$(gh pr view "$PR" -R "$REPO" --json headRefOid -q .headRefOid)"
+if [ "$current_sha" != "$head_sha" ]; then
+  echo "REFUSED: PR head changed while checking ($head_sha -> $current_sha); re-run merge." >&2
+  exit 1
+fi
+
+if [ "$DRY_RUN" = 1 ]; then
+  echo "DRY RUN: all checks green - would merge daily PR #$PR to $BASE."
+  exit 0
+fi
+
+echo "All checks green. Merging daily PR #$PR to $BASE ..."
+gh pr merge "$PR" -R "$REPO" --merge
+echo "Merged #$PR."

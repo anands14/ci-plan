@@ -1,0 +1,141 @@
+# First project managed by this pipeline.
+# Stack locked 2026-06-28 via grill session:
+#   Flutter (Dart) for macOS/iOS/Android; web is a thin, separate md->HTML reading layer.
+#   Local-first, files-as-truth (Markdown + JSONCanvas) + a disposable local SQLite index.
+#   Three packages: pure-Dart `core` (zero Flutter), Flutter `app`, Dart `agent` MCP daemon (macOS only).
+#   See ../Tovi/docs/CONSTITUTION.md for the full architecture and rationale.
+
+project:
+  name: humanmind
+  repo: anands14/tovi                 # GitHub repo; origin remote verified 2026-06-28
+  default_branch: main
+  local_path: ../Tovi                 # the Tovi app repo (sibling of this framework repo)
+  agent_remote: agent                 # Local alias to the no-mistakes gate remote; workers never push origin
+
+# Path inside the HumanMind repo to its own project constitution.
+constitution: docs/CONSTITUTION.md
+
+agents:
+  implementer:
+    tool: codex
+  reviewer:
+    tool: claude
+  advisory:
+    tool: gemini
+    checks: [criteria-conformance, test-honesty]
+
+worker_environment:
+  home: ~/.agent-home/tovi-worker
+  require_scrubbed_env: true
+  forbid_human_gh_auth: true
+  forbid_orchestrator_token: true
+  forbid_origin_push: true
+  allow_shared_platform_tools: true
+
+budget:
+  concurrency:
+    implementers_start: 2
+    implementers_max: 5
+    reviewers: 1
+    sim_validations: 1
+  loop:
+    per_task_window_share: 0.30       # fairness pause -> deferred, not stuck, while progress is plausible
+    stuck_on:
+      - implementer_disputes_review_or_spec
+      - spec_unclear_or_wrong
+      - repeated_protected_path_conflict
+      - repeated_architecture_invariant_violation
+      - no_material_diff_between_attempts
+      - missing_external_input
+    checkpoint_commits: true
+  schedule:
+    order: small-wins-first
+    queue_overproduce_to: 10
+
+triggers:
+  mode: event-wake-plus-poll
+  poll_interval_seconds: 300
+  github_issue_events: [labeled, reopened, edited]
+  wake_command: orchestrator wake --project humanmind
+
+# Gate commands. Mirror these in the HumanMind repo's .no-mistakes.yaml.
+# melos orchestrates the core/app/agent packages from the repo root.
+gate:
+  no_mistakes_config: .no-mistakes.yaml
+  ci_autofix: off                          # keep off so CI auto-fix can't burn a window
+  commands:
+    format: fvm dart run melos run format    # dart format --set-exit-if-changed .
+    lint:   fvm dart run melos run analyze   # dart analyze --fatal-infos --fatal-warnings
+    test: >-
+      fvm dart run melos run test:fast &&
+      fvm dart run melos run test:backend-e2e
+    build:  fvm flutter build apk --debug    # compile smoke - NIGHTLY ONLY, not in the per-PR gate (.no-mistakes.yaml omits it; see tests.nightly_e2e)
+
+context:
+  handoff_log: AGENT_HANDOFF.md
+  map_paths:
+    - AGENT_CONTEXT.md
+    - packages/tovi_app/lib/src/tasks/AGENT_CONTEXT.md
+    - packages/tovi_core/lib/src/tasks/AGENT_CONTEXT.md
+  techniques:
+    - rg -> symbol slice; no cold full-file reads.
+    - task maps before today_page/task_commands.
+    - ListView: scrollUntilVisible may need cache-extent movement.
+    - files-truth: assert vault/durable store, not only UI/return.
+  gotchas:
+    - use fvm.
+    - macOS sim foreground flaky -> iOS sim; record fallback.
+    - current sprint = lowest current-or-future sprint number.
+  scoped_tests:
+    - core cmd/store: packages/tovi_core `fvm dart test test/tasks/<name>_test.dart`.
+    - core persistence: include matching `*_backend_e2e_test.dart`.
+    - app widget: packages/tovi_app `fvm flutter test test/today_page_test.dart --plain-name "<case>"`.
+    - app-facing: integration_test unless issue says e2e-exempt.
+
+review:
+  clean_glance_merge: true
+  flagged_requires_real_attention: true
+  report: basic-checklist
+
+integration:
+  daily_branch_prefix: day
+  required_pr_contexts: [gate, test-discipline, sim-validation, review]
+  post_merge_required_contexts: [gate, test-discipline]
+  final_required_contexts: [gate, test-discipline, daily-integration]
+  post_merge_poll_attempts: 60
+  post_merge_poll_seconds: 30
+
+notify:
+  push: true
+
+# Test pyramid. Per-PR is fast and emulator-free; Apple E2E runs on the Mac, nightly.
+tests:
+  per_pr: [unit, widget, backend-e2e]   # headless on Linux; backend-e2e drives core/daemon with REAL file+SQLite adapters (grill 2026-06-28)
+  nightly_e2e:
+    linux: [build-apk, android]   # compile smoke + integration_test on an emulator
+    mac:   [ios, macos]           # Apple targets need Apple hardware; schedule outside the agent windows
+    # web is a separate thin md->HTML layer, not a Flutter build; tested independently, not here.
+  flake_firewall:
+    retries: 2
+
+# Change-aware sim-validation. bin/sim-validate fails closed to `both` when it
+# cannot compute the diff. Path triggers are intentionally conservative: native
+# project files and dependency/tooling changes can affect platform behavior even
+# when Dart app code did not change.
+sim_validation:
+  default_platform: macos
+  allow_na_when_all_paths_match:
+    - '^packages/tovi_core/'
+  ios_path_triggers:
+    - '^packages/tovi_app/lib/'
+    - '^packages/tovi_app/integration_test/'
+    - '^packages/tovi_app/ios/'
+  both_path_triggers:
+    - '^packages/tovi_app/(android|ios|macos)/'
+    - '^packages/tovi_app/pubspec.yaml$'
+    - '^pubspec.yaml$'
+    - '^pubspec.lock$'
+  ios_content_triggers:
+    - 'Platform\.isIOS'
+    - 'GestureDetector|RawGestureDetector|Listener|TapGestureRecognizer|LongPressGestureRecognizer|Draggable'
+    - 'voice|microphone|Speech|speech'

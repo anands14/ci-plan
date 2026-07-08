@@ -1,0 +1,117 @@
+# Per-project config. Copy to projects/<name>.yaml and fill in.
+# This is the bridge between the agnostic framework and one target repository.
+# Nothing here is framework-global; everything is specific to the project being run.
+
+project:
+  name: my-app                       # short id, used for labels and the projects/<name>.yaml filename
+  repo: git@github.com:you/my-app.git # the target repository (the code being built)
+  default_branch: main
+  local_path: ~/code/my-app          # optional: where the framework checks it out / leases worktrees from
+  agent_remote: agent                # writable remote/fork for workers; origin is human/canonical
+
+# Path, inside the target repo, to that project's own constitution.
+# The framework loads it as standing context alongside the agnostic CONSTITUTION.md.
+constitution: docs/CONSTITUTION.md
+
+# Which agents play which role for this project, and how they are invoked.
+# The reviewer MUST be a different model family than the implementer (see CONSTITUTION.md section 2).
+agents:
+  implementer:
+    tool: codex                      # invoked as `codex exec`
+    # model / args overrides are optional and tool-specific
+  reviewer:
+    tool: claude                     # invoked locally as `claude -p` so it draws from the subscription window
+  advisory:                          # optional; remove the block to disable
+    tool: gemini
+    checks: [criteria-conformance, test-honesty]   # bounded, advisory-only
+
+worker_environment:
+  home: ~/.agent-home/my-app-worker   # dedicated HOME for worker processes
+  require_scrubbed_env: true
+  forbid_human_gh_auth: true
+  forbid_orchestrator_token: true
+  forbid_origin_push: true
+  allow_shared_platform_tools: true    # share Xcode/simulators/Flutter/browser caches instead of duplicating them
+
+# Budget, loop controls, and concurrency for this project.
+budget:
+  windows:                           # the framework treats each agent's subscription window as a separate tap
+    implementer_window_minutes: 300  # informational; the real reset is rolling and detected at runtime
+    reviewer_window_minutes: 300
+  concurrency:
+    implementers_start: 2            # start conservative; raise toward 4-5 after measuring
+    implementers_max: 5
+    reviewers: 1
+    sim_validations: 1               # serialize first to avoid simulator contention
+  loop:
+    per_task_window_share: 0.30      # fairness pause; label deferred, not stuck, when progress is plausible
+    stuck_on:
+      - implementer_disputes_review_or_spec
+      - spec_unclear_or_wrong
+      - repeated_protected_path_conflict
+      - repeated_architecture_invariant_violation
+      - no_material_diff_between_attempts
+      - missing_external_input
+    checkpoint_commits: true
+  schedule:
+    order: small-wins-first          # bank quick, sure tasks early
+    queue_overproduce_to: 10         # how many `ready` tasks to aim to have queued per day
+
+triggers:
+  mode: event-wake-plus-poll
+  poll_interval_seconds: 300
+  github_issue_events: [labeled, reopened, edited]
+  wake_command: orchestrator wake --project my-app
+
+# The gate. The framework drives no-mistakes against the target repo; these are the checks it runs.
+# Prefer pointing at the target repo's own .no-mistakes.yaml; inline is a fallback.
+gate:
+  no_mistakes_config: .no-mistakes.yaml   # path in the target repo
+  ci_autofix: off                    # IMPORTANT: orchestrator-owned Codex loop is the only fix loop
+  # inline fallback if the target repo has no .no-mistakes.yaml:
+  # commands:
+  #   build: flutter build
+  #   test:  flutter test
+  #   lint:  dart analyze
+  #   format: dart format --set-exit-if-changed .
+
+# The human review throttle. The system's hard ceiling on merge rate.
+review:
+  clean_glance_merge: true
+  flagged_requires_real_attention: true
+  report: basic-checklist            # token-free; clean / flagged / stuck / deferred
+
+# Daily integration branch.
+# Agent PRs target `day/YYYY-MM-DD`; the integration agent serially merges one
+# approved PR at a time, verifies post-merge checks on that branch, and reverts
+# the PR if the branch turns red.
+integration:
+  daily_branch_prefix: day
+  required_pr_contexts: [gate, test-discipline, sim-validation, review]
+  post_merge_required_contexts: [gate, test-discipline]
+  final_required_contexts: [gate, test-discipline, daily-integration]
+  post_merge_poll_attempts: 60
+  post_merge_poll_seconds: 30
+
+# How the human is notified the day's batch is ready.
+notify:
+  push: true
+
+# Test pyramid for this project (per-PR fast checks vs nightly full E2E).
+tests:
+  per_pr: [unit, widget, smoke]
+  nightly_e2e:
+    linux: [android, web]
+    mac: [ios, macos]               # Apple-platform builds need Apple hardware (run on the Mac)
+  flake_firewall:
+    retries: 2                       # an E2E failure must survive this many retries before it becomes a bug
+
+sim_validation:
+  required_for_user_facing: true
+  default_platform: macos            # cheapest credible target for generic UI
+  pure_backend_can_skip: true
+  ios_path_triggers: []
+  android_path_triggers: []
+  macos_path_triggers: []
+  both_or_specific_path_triggers: []
+  content_triggers: []

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# post-status - post a GitHub commit status as the ORCHESTRATOR, the only
+# identity allowed to attest `sim-validation` / `review` / `daily-integration`. The agent token must
+# NOT be able to do this; that firewall is what makes a posted status
+# trustworthy ("the thing being judged never holds the pen").
+#
+# Usage:
+#   post-status --sha <sha>|--pr <pr> --context <ctx> --state <state> \
+#               [--description <text>] [--url <url>] [--repo owner/name]
+#   state: success | failure | pending | error
+set -euo pipefail
+
+REPO="anands14/tovi"
+TOKEN_VAR="TOVI_ORCHESTRATOR_GH_TOKEN"
+ENV_FILE="$(cd "$(dirname "$0")/.." && pwd)/.env"
+SHA="" PR="" CONTEXT="" STATE="" DESC="" URL=""
+ALLOWED_CONTEXTS="sim-validation review daily-integration"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --sha) SHA="$2"; shift 2 ;;
+    --pr) PR="$2"; shift 2 ;;
+    --context) CONTEXT="$2"; shift 2 ;;
+    --state) STATE="$2"; shift 2 ;;
+    --description) DESC="$2"; shift 2 ;;
+    --url) URL="$2"; shift 2 ;;
+    --repo) REPO="$2"; shift 2 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+[ -n "$CONTEXT" ] && [ -n "$STATE" ] || {
+  echo "usage: post-status --sha <sha>|--pr <pr> --context <ctx> --state <state> [...]" >&2
+  exit 2
+}
+case " $ALLOWED_CONTEXTS " in
+  *" $CONTEXT "*) ;;
+  *) echo "refusing to post non-orchestrator context '$CONTEXT' (allowed: $ALLOWED_CONTEXTS)" >&2; exit 2 ;;
+esac
+case "$STATE" in
+  success|failure|pending|error) ;;
+  *) echo "invalid state '$STATE' (expected success|failure|pending|error)" >&2; exit 2 ;;
+esac
+
+# Load the orchestrator token. In unattended mode this token must be injected only
+# into the orchestrator process, never into an agent-readable workspace.
+[ -f "$ENV_FILE" ] && { set -a; . "$ENV_FILE"; set +a; }
+TOKEN="${!TOKEN_VAR:-}"
+[ -n "$TOKEN" ] || { echo "no token in \$$TOKEN_VAR (check $ENV_FILE)" >&2; exit 1; }
+
+# Resolve a PR number to its head SHA.
+if [ -z "$SHA" ] && [ -n "$PR" ]; then
+  SHA="$(GH_TOKEN="$TOKEN" gh pr view "$PR" -R "$REPO" --json headRefOid -q .headRefOid)"
+fi
+[ -n "$SHA" ] || { echo "need --sha or --pr" >&2; exit 2; }
+
+args=(-X POST "repos/$REPO/statuses/$SHA" -f state="$STATE" -f context="$CONTEXT")
+[ -n "$DESC" ] && args+=(-f description="$DESC")
+[ -n "$URL" ] && args+=(-f target_url="$URL")
+
+GH_TOKEN="$TOKEN" gh api "${args[@]}" --jq '"posted " + .context + " = " + .state'

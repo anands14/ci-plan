@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# review - the orchestrator's cross-model review step. Runs the reviewer (a
+# DIFFERENT model than the implementer) over the PR's FINAL SHA + diff + the
+# issue's acceptance criteria, then posts the `review` commit status. Green CI
+# is necessary but never sufficient; this is the other half of the gate.
+#
+# The reviewer runs locally via `claude -p --model "$REVIEW_MODEL"` so it stays
+# on the subscription window. NOTE: `claude` must be on PATH in the run
+# environment (it is not in every sandbox). Use --test-verdict for no-status
+# script tests without invoking the model.
+#
+# Usage: review --pr <pr> [--repo owner/name] [--skill <path>] [--issue <n>]
+#               [--model <claude-model>] [--dry-run]
+#               [--test-verdict approve|request-changes] [--test-routing clean|flagged]
+#               [--post]
+set -euo pipefail
+
+REPO="anands14/tovi"
+SKILL="$(cd "$(dirname "$0")/.." && pwd)/skills/pipeline-reviewer/SKILL.md"
+REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-claude-opus-4-8}"
+PR="" DRY=0 POST=0 VERDICT="" ROUTING="" TEST_VERDICT=0 ISSUE=""
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pr) PR="$2"; shift 2 ;;
+    --repo) REPO="$2"; shift 2 ;;
+    --skill) SKILL="$2"; shift 2 ;;
+    --issue) ISSUE="$2"; shift 2 ;;
+    --model) REVIEW_MODEL="$2"; shift 2 ;;
+    --test-verdict) VERDICT="$2"; TEST_VERDICT=1; shift 2 ;;
+    --test-routing) ROUTING="$2"; shift 2 ;;
+    --verdict) echo "--verdict was replaced by --test-verdict and cannot post statuses" >&2; exit 2 ;;
+    --dry-run) DRY=1; shift ;;
+    --post) POST=1; shift ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+[ -n "$PR" ] || { echo "usage: review --pr <pr> [...]" >&2; exit 2; }
+if [ "$TEST_VERDICT" = 1 ] && [ "$POST" = 1 ]; then
+  echo "--test-verdict may not be combined with --post; use it only for no-status script tests." >&2
+  exit 2
+fi
+
+extract_reviewer_field() {
+  local field="$1" text="$2" value=""
+  value="$(printf '%s' "$text" |
+    jq -r --arg field "$field" 'try .[$field] // empty catch empty' 2>/dev/null || true)"
+  if [ -n "$value" ]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  value="$(printf '%s\n' "$text" |
+    awk '
+      /^```json[[:space:]]*$/ { in_json=1; next }
+      /^```[[:space:]]*$/ && in_json { exit }
+      in_json { print }
+    ' |
+    jq -r --arg field "$field" 'try .[$field] // empty catch empty' 2>/dev/null || true)"
+  if [ -n "$value" ]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  printf '%s\n' "$text" |
+    grep -Eo "\"$field\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" |
+    head -1 |
+    sed -E 's/^[^:]+:[[:space:]]*"([^"]+)".*$/\1/'
+}
+
+# Review inputs: the FINAL head SHA (Q2 - always re-review the exact SHA), the
+# diff, and the PR body (which carries the criteria-coverage + the implementer's
+# notes per the PR template). The linked issue's acceptance criteria are the
+# oracle; the PR body is implementer-controlled and is context only.
+head_sha="$(gh pr view "$PR" -R "$REPO" --json headRefOid -q .headRefOid)"
+diff="$(gh pr diff "$PR" -R "$REPO")"
+body="$(gh pr view "$PR" -R "$REPO" --json body -q .body)"
+if [ -z "$ISSUE" ]; then
+  ISSUE="$(gh pr view "$PR" -R "$REPO" --json closingIssuesReferences -q '.closingIssuesReferences[0].number // empty' 2>/dev/null || true)"
+fi
+if [ -z "$ISSUE" ]; then
+  ISSUE="$(printf '%s\n' "$body" | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)"
+fi
+[ -n "$ISSUE" ] || {
+  echo "no linked issue found; review needs the issue acceptance criteria as the oracle" >&2
+  exit 3
+}
+issue_json="$(gh issue view "$ISSUE" -R "$REPO" --json number,title,body)"
+issue_title="$(printf '%s\n' "$issue_json" | jq -r .title)"
+issue_body="$(printf '%s\n' "$issue_json" | jq -r .body)"
+
+prompt="$(cat "$SKILL" 2>/dev/null || echo '[pipeline-reviewer role skill]')
+
+Review this PR on its FINAL SHA ($head_sha). Green CI is necessary, not
+sufficient. Judge any test-assertion change against the acceptance criteria,
+never your own taste; if the criteria do not settle it, request human input.
+Emit only the structured JSON object from your output contract.
+Do not wrap it in Markdown.
+
+--- linked issue #$ISSUE: $issue_title ---
+$issue_body
+
+--- PR body ---
+$body
+
+--- diff ---
+$diff"
+
+if [ "$DRY" = 1 ]; then
+  echo "Would review PR #$PR @ $head_sha against issue #$ISSUE via Claude model $REVIEW_MODEL."
+  echo "Prompt assembled: ${#prompt} bytes (skill + final-SHA instruction + issue + body + diff)."
+  exit 0
+fi
+
+# Run the reviewer unless a verdict was supplied for testing.
+if [ -z "$VERDICT" ]; then
+  command -v claude >/dev/null \
+    || { echo "claude not on PATH - run where the reviewer model lives, or pass --test-verdict without --post" >&2; exit 3; }
+  out="$(printf '%s' "$prompt" | claude -p --model "$REVIEW_MODEL" --output-format json)"
+  reviewer_payload="$(printf '%s' "$out" | jq -r '.verdict // .result // empty')"
+  VERDICT="$(extract_reviewer_field verdict "$reviewer_payload")"
+  ROUTING="$(extract_reviewer_field routing "$reviewer_payload")"
+  if [ -z "$VERDICT" ]; then
+    VERDICT="$reviewer_payload"
+  fi
+fi
+
+case "$VERDICT" in
+  approve) state=success ;;
+  request-changes|request_changes|changes) state=failure ;;
+  *) echo "unrecognized verdict: '$VERDICT'" >&2; exit 3 ;;
+esac
+if [ "$TEST_VERDICT" = 1 ] && [ -z "$ROUTING" ]; then
+  ROUTING=clean
+fi
+case "$ROUTING" in
+  clean|flagged) ;;
+  *) echo "unrecognized routing: '$ROUTING' (expected clean or flagged)" >&2; exit 3 ;;
+esac
+if [ -n "$ROUTING" ]; then
+  echo "review verdict: $VERDICT/$ROUTING -> $state  (model $REVIEW_MODEL, sha $head_sha)"
+else
+  echo "review verdict: $VERDICT -> $state  (model $REVIEW_MODEL, sha $head_sha)"
+fi
+
+if [ "$POST" = 1 ]; then
+  current_sha="$(gh pr view "$PR" -R "$REPO" --json headRefOid -q .headRefOid)"
+  if [ "$current_sha" != "$head_sha" ]; then
+    echo "PR head changed during review ($head_sha -> $current_sha); refusing to post stale review." >&2
+    exit 4
+  fi
+  desc="cross-model review: $VERDICT"
+  [ -n "$ROUTING" ] && desc="$desc/$ROUTING"
+  desc="$desc; $REVIEW_MODEL"
+  "$HERE/post-status" --sha "$head_sha" --context review --state "$state" \
+    --description "$desc" --repo "$REPO"
+fi
