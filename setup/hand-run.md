@@ -46,8 +46,9 @@ It produced PR [#8](https://github.com/anands14/tovi/pull/8), which is routed `a
    ```
 
 2. **Implement (codex).** Inject the implementer role + the issue body; codex writes code **and** tests derived from the acceptance criteria.
+   Default model: GPT-5.5 high unless the human explicitly overrides.
    ```sh
-   codex exec "$(cat skills/pipeline-implementer/SKILL.md)
+   codex exec --model gpt-5.5 -c 'model_reasoning_effort="high"' "$(cat skills/pipeline-implementer/SKILL.md)
 
    Task: $(gh issue view <n> --json body -q .body)"
    ```
@@ -69,11 +70,12 @@ It produced PR [#8](https://github.com/anands14/tovi/pull/8), which is routed `a
    ```
    Red -> fix via codex, push to the same PR, and re-gate while progress is material.
 
-6. **Cross-model review (Claude Opus 4.8, on the final SHA).** Posts the `review` status.
+6. **Cross-model review (Claude Opus 4.8 Max, on the final SHA).** Posts the `review` status.
    ```sh
    bin/review --pr <N> --post
    ```
-   The wrapper defaults to `claude-opus-4-8`, accepts `--model <claude-model>` for intentional overrides, and includes the model in the posted status description.
+   The wrapper defaults to `claude-opus-4-8 --effort max`, accepts `--model <claude-model>` and `--effort <level>` for intentional overrides, and includes the model in the posted status description.
+   If Claude cannot run or cannot return a verdict, it falls back to GPT-5.5 xhigh through Codex.
    `request-changes` -> codex addresses, re-gate, and re-review while it accepts the objection.
 
 7. **Daily integration.** Only when all required agent-PR contexts are green.

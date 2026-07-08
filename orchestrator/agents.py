@@ -108,6 +108,10 @@ def run_implementer_once(
     command = [
         "codex",
         "exec",
+        "--model",
+        config.implementer_model,
+        "-c",
+        f'model_reasoning_effort="{config.implementer_effort}"',
         "--cd",
         str(lease_path),
         "--json",

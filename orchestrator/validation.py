@@ -118,9 +118,15 @@ def run_review(
         str(entry.issue_number),
         "--repo",
         config.repo,
+        "--model",
+        model or config.reviewer_model,
+        "--effort",
+        config.reviewer_effort,
+        "--fallback-model",
+        config.reviewer_fallback_model,
+        "--fallback-effort",
+        config.reviewer_fallback_effort,
     ]
-    if model:
-        command += ["--model", model]
     if post:
         command.append("--post")
 

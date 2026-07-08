@@ -210,6 +210,9 @@ class AgentTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0)
             self.assertIn("codex", result.command)
+            self.assertIn("--model", result.command)
+            self.assertEqual(result.command[result.command.index("--model") + 1], "gpt-5.5")
+            self.assertIn('model_reasoning_effort="high"', result.command)
             self.assertFalse(result.prompt_path.exists())
 
     def test_run_records_session_summary_and_updates_ledger(self):

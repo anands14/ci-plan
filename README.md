@@ -42,6 +42,18 @@ If they fail, the integration lane reverts the just-merged PR, comments with the
 At the end of the day the orchestrator opens one PR from the daily branch to `main`; only the human approves and merges that final PR.
 The full mechanism, guardrails, and budget model are in [PLAN.md](PLAN.md).
 
+## Runtime Dependencies
+
+The framework calls these tools as installed CLIs.
+Their source repos are not vendored here.
+
+- `treehouse` for leased worktree isolation.
+- `no-mistakes` for the local gate and PR handoff.
+- `codex` for implementation, defaulting to `gpt-5.5` with `high` reasoning unless a project config or human override says otherwise.
+- `claude` for the gating review, defaulting to Opus 4.8 with `max` effort.
+- `codex` reviewer fallback uses `gpt-5.5` with `xhigh` reasoning when Claude cannot run or cannot return a verdict.
+- `gh` for GitHub issue, PR, and check reads.
+
 ## Registering a target project
 
 1. Copy [templates/project.config.example.yaml](templates/project.config.example.yaml) to `projects/<name>.yaml` and fill it in.

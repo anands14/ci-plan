@@ -10,7 +10,7 @@ The pipeline role skills are the opposite: they are useful *only* during a pipel
 
 ## How they are delivered instead: orchestrator injection
 
-The orchestrator owns control flow and drives the agents (`codex exec`, `claude -p --model claude-opus-4-8`).
+The orchestrator owns control flow and drives the agents (`codex exec --model gpt-5.5 -c model_reasoning_effort="high"`, `claude -p --model claude-opus-4-8 --effort max`, with Codex GPT-5.5 xhigh as review fallback).
 It assigns a role by **injecting that role skill's body into the invocation prompt** for the one task at hand.
 This is:
 
@@ -25,7 +25,7 @@ The role skills reference the *capability* skills by name (`use the tdd skill`).
 Until the orchestrator is built, inject by hand. For example:
 
 ```sh
-codex exec "$(cat skills/pipeline-implementer/SKILL.md)
+codex exec --model gpt-5.5 -c 'model_reasoning_effort="high"' "$(cat skills/pipeline-implementer/SKILL.md)
 
 Task: <issue link or acceptance criteria>"
 ```

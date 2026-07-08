@@ -18,8 +18,15 @@ constitution: docs/CONSTITUTION.md
 agents:
   implementer:
     tool: codex
+    model: gpt-5.5
+    effort: high
   reviewer:
     tool: claude
+    model: claude-opus-4-8
+    effort: max
+    fallback_tool: codex
+    fallback_model: gpt-5.5
+    fallback_effort: xhigh
   advisory:
     tool: gemini
     checks: [criteria-conformance, test-honesty]

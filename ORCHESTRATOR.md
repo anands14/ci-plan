@@ -13,7 +13,7 @@ Keep extending them only after each manual or watched run proves the next behavi
   Periodic polling remains the safety net for missed events, reboot, sleep, runner downtime, and label drift.
 - **Two sources of state.** GitHub issue/PR labels are the public lifecycle state (see [setup/labels.yaml](setup/labels.yaml)).
   A small local run ledger stores operational facts such as worker PID, leased worktree path, current step, session id, last failure summary, and log paths.
-- **Owns control flow; delegates cognition.** Agents think (`codex exec`, `claude -p --model claude-opus-4-8`), skills instruct, tools execute (treehouse, no-mistakes).
+- **Owns control flow; delegates cognition.** Agents think (`codex exec --model gpt-5.5 -c model_reasoning_effort="high"`, `claude -p --model claude-opus-4-8 --effort max`), skills instruct, tools execute (treehouse, no-mistakes).
   The orchestrator wires them and never delegates scheduling judgment to a model.
 - **Config-driven and project-agnostic.** Everything project-specific comes from `projects/<name>.yaml`; the orchestrator code knows nothing about any stack.
 - **Agent-owned remote only.** In unattended mode, workers may not push directly to origin.
@@ -71,8 +71,9 @@ Mirrors CONSTITUTION.md section 3, and the test/check design settled for the fir
    Conflicted or non-trivial resolution wakes Codex only when necessary.
 10. **Review.** Green -> `in-review`.
     If the Claude window is dry, leave it and resume next window.
-    Else inject the reviewer role and run `claude -p --model claude-opus-4-8` over the **exact final SHA** + criteria + implementer result, then **post the `review` status**.
-    `CLAUDE_REVIEW_MODEL` may override the exact reviewer model when the operator intentionally changes the gate.
+    Else inject the reviewer role and run `claude -p --model claude-opus-4-8 --effort max` over the **exact final SHA** + criteria + implementer result, then **post the `review` status**.
+    If Claude cannot run or cannot return a verdict, the reviewer wrapper falls back to `codex exec --model gpt-5.5 -c model_reasoning_effort="xhigh"`.
+    `CLAUDE_REVIEW_MODEL`, `CLAUDE_REVIEW_EFFORT`, `CODEX_REVIEW_FALLBACK_MODEL`, and `CODEX_REVIEW_FALLBACK_EFFORT` may override the exact reviewer models when the operator intentionally changes the gate.
     Green CI is necessary, never sufficient.
     A test-assertion change is judged against the issue's **acceptance criteria**; if the criteria do not settle it, escalate to `needs-human` rather than guess.
     Run the advisory checker (Gemini) in parallel only if configured; attached, never gating.
@@ -138,7 +139,7 @@ The Codex and Claude subscription windows are independent resource taps on a two
 - **no-mistakes** (CLI): the gate + PR machinery, driven via `git push no-mistakes` and its `axi` interface for status.
   Configured per project; `ci_autofix` off or tightly bounded.
   The orchestrator-owned Codex loop is the only fix loop.
-- **codex / claude** (CLIs): `codex exec` (implementer), `claude -p --model claude-opus-4-8` (reviewer), each with the injected role skill + task.
+- **codex / claude** (CLIs): `codex exec --model gpt-5.5 -c model_reasoning_effort="high"` (implementer), `claude -p --model claude-opus-4-8 --effort max` (reviewer), and `codex exec --model gpt-5.5 -c model_reasoning_effort="xhigh"` as the reviewer fallback.
   Subscription windows, run locally.
 - **gemini**: advisory checks, output attached to the PR.
   Free; never gates.

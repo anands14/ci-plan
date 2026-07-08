@@ -114,6 +114,14 @@ class ValidationTests(unittest.TestCase):
             fake_github = FakeGitHub()
 
             def fake_runner(command, **kwargs):
+                self.assertIn("--model", command)
+                self.assertEqual(command[command.index("--model") + 1], "claude-opus-4-8")
+                self.assertIn("--effort", command)
+                self.assertEqual(command[command.index("--effort") + 1], "max")
+                self.assertIn("--fallback-model", command)
+                self.assertEqual(command[command.index("--fallback-model") + 1], "gpt-5.5")
+                self.assertIn("--fallback-effort", command)
+                self.assertEqual(command[command.index("--fallback-effort") + 1], "xhigh")
                 return subprocess.CompletedProcess(
                     command,
                     0,

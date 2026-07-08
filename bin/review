@@ -4,13 +4,13 @@
 # issue's acceptance criteria, then posts the `review` commit status. Green CI
 # is necessary but never sufficient; this is the other half of the gate.
 #
-# The reviewer runs locally via `claude -p --model "$REVIEW_MODEL"` so it stays
-# on the subscription window. NOTE: `claude` must be on PATH in the run
-# environment (it is not in every sandbox). Use --test-verdict for no-status
-# script tests without invoking the model.
+# The reviewer tries Claude locally first so it stays on the subscription
+# window. If Claude cannot run or cannot return a verdict, the wrapper falls
+# back to Codex using the configured fallback model and effort.
 #
 # Usage: review --pr <pr> [--repo owner/name] [--skill <path>] [--issue <n>]
-#               [--model <claude-model>] [--dry-run]
+#               [--model <claude-model>] [--effort max] [--dry-run]
+#               [--fallback-model <codex-model>] [--fallback-effort xhigh]
 #               [--test-verdict approve|request-changes] [--test-routing clean|flagged]
 #               [--post]
 set -euo pipefail
@@ -18,8 +18,13 @@ set -euo pipefail
 REPO="anands14/tovi"
 SKILL="$(cd "$(dirname "$0")/.." && pwd)/skills/pipeline-reviewer/SKILL.md"
 REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-claude-opus-4-8}"
+REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-max}"
+FALLBACK_MODEL="${CODEX_REVIEW_FALLBACK_MODEL:-gpt-5.5}"
+FALLBACK_EFFORT="${CODEX_REVIEW_FALLBACK_EFFORT:-xhigh}"
 PR="" DRY=0 POST=0 VERDICT="" ROUTING="" TEST_VERDICT=0 ISSUE=""
 HERE="$(cd "$(dirname "$0")" && pwd)"
+ACTIVE_REVIEWER="claude"
+ACTIVE_MODEL="$REVIEW_MODEL"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,6 +33,9 @@ while [ $# -gt 0 ]; do
     --skill) SKILL="$2"; shift 2 ;;
     --issue) ISSUE="$2"; shift 2 ;;
     --model) REVIEW_MODEL="$2"; shift 2 ;;
+    --effort) REVIEW_EFFORT="$2"; shift 2 ;;
+    --fallback-model) FALLBACK_MODEL="$2"; shift 2 ;;
+    --fallback-effort) FALLBACK_EFFORT="$2"; shift 2 ;;
     --test-verdict) VERDICT="$2"; TEST_VERDICT=1; shift 2 ;;
     --test-routing) ROUTING="$2"; shift 2 ;;
     --verdict) echo "--verdict was replaced by --test-verdict and cannot post statuses" >&2; exit 2 ;;
@@ -107,22 +115,100 @@ $body
 $diff"
 
 if [ "$DRY" = 1 ]; then
-  echo "Would review PR #$PR @ $head_sha against issue #$ISSUE via Claude model $REVIEW_MODEL."
+  echo "Would review PR #$PR @ $head_sha against issue #$ISSUE via Claude model $REVIEW_MODEL/$REVIEW_EFFORT."
+  echo "Fallback reviewer: Codex model $FALLBACK_MODEL/$FALLBACK_EFFORT."
   echo "Prompt assembled: ${#prompt} bytes (skill + final-SHA instruction + issue + body + diff)."
   exit 0
 fi
 
+parse_reviewer_payload() {
+  local text="$1"
+  local payload="$2"
+  VERDICT="$(extract_reviewer_field verdict "$payload")"
+  ROUTING="$(extract_reviewer_field routing "$payload")"
+  if [ -z "$VERDICT" ] && [ -n "$payload" ]; then
+    VERDICT="$payload"
+  fi
+  if [ -z "$VERDICT" ]; then
+    VERDICT="$(extract_reviewer_field verdict "$text")"
+  fi
+  if [ -z "$ROUTING" ]; then
+    ROUTING="$(extract_reviewer_field routing "$text")"
+  fi
+}
+
+review_payload_is_usable() {
+  case "$VERDICT" in
+    approve|request-changes|request_changes|changes) ;;
+    *) return 1 ;;
+  esac
+  case "$ROUTING" in
+    clean|flagged) ;;
+    *) return 1 ;;
+  esac
+}
+
+run_claude_review() {
+  local out reviewer_payload err_file
+  VERDICT=""
+  ROUTING=""
+  command -v claude >/dev/null || {
+    echo "claude not on PATH; falling back to Codex reviewer" >&2
+    return 1
+  }
+  err_file="$(mktemp "${TMPDIR:-/tmp}/review-claude.XXXXXX")"
+  if ! out="$(printf '%s' "$prompt" | claude -p --model "$REVIEW_MODEL" --effort "$REVIEW_EFFORT" --output-format json 2>"$err_file")"; then
+    echo "Claude reviewer failed; falling back to Codex reviewer." >&2
+    cat "$err_file" >&2 || true
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
+  reviewer_payload="$(printf '%s' "$out" | jq -r '.verdict // .result // empty')"
+  parse_reviewer_payload "$out" "$reviewer_payload"
+  if ! review_payload_is_usable; then
+    echo "Claude reviewer returned an unusable verdict/routing; falling back to Codex reviewer." >&2
+    VERDICT=""
+    ROUTING=""
+    return 1
+  fi
+  ACTIVE_REVIEWER="claude"
+  ACTIVE_MODEL="$REVIEW_MODEL/$REVIEW_EFFORT"
+}
+
+run_codex_review() {
+  local result_file stdout_file reviewer_payload
+  VERDICT=""
+  ROUTING=""
+  command -v codex >/dev/null \
+    || { echo "codex not on PATH; cannot run fallback reviewer" >&2; exit 3; }
+  result_file="$(mktemp "${TMPDIR:-/tmp}/review-codex-result.XXXXXX")"
+  stdout_file="$(mktemp "${TMPDIR:-/tmp}/review-codex-stdout.XXXXXX")"
+  if ! printf '%s' "$prompt" | codex exec \
+    --model "$FALLBACK_MODEL" \
+    -c "model_reasoning_effort=\"$FALLBACK_EFFORT\"" \
+    --json \
+    --output-last-message "$result_file" \
+    - >"$stdout_file"; then
+    cat "$stdout_file" >&2 || true
+    rm -f "$result_file" "$stdout_file"
+    echo "fallback Codex reviewer failed" >&2
+    exit 3
+  fi
+  reviewer_payload="$(cat "$result_file")"
+  parse_reviewer_payload "$reviewer_payload" "$reviewer_payload"
+  rm -f "$result_file" "$stdout_file"
+  review_payload_is_usable || {
+    echo "fallback Codex reviewer returned an unusable verdict/routing" >&2
+    exit 3
+  }
+  ACTIVE_REVIEWER="codex"
+  ACTIVE_MODEL="$FALLBACK_MODEL/$FALLBACK_EFFORT"
+}
+
 # Run the reviewer unless a verdict was supplied for testing.
 if [ -z "$VERDICT" ]; then
-  command -v claude >/dev/null \
-    || { echo "claude not on PATH - run where the reviewer model lives, or pass --test-verdict without --post" >&2; exit 3; }
-  out="$(printf '%s' "$prompt" | claude -p --model "$REVIEW_MODEL" --output-format json)"
-  reviewer_payload="$(printf '%s' "$out" | jq -r '.verdict // .result // empty')"
-  VERDICT="$(extract_reviewer_field verdict "$reviewer_payload")"
-  ROUTING="$(extract_reviewer_field routing "$reviewer_payload")"
-  if [ -z "$VERDICT" ]; then
-    VERDICT="$reviewer_payload"
-  fi
+  run_claude_review || run_codex_review
 fi
 
 case "$VERDICT" in
@@ -138,9 +224,9 @@ case "$ROUTING" in
   *) echo "unrecognized routing: '$ROUTING' (expected clean or flagged)" >&2; exit 3 ;;
 esac
 if [ -n "$ROUTING" ]; then
-  echo "review verdict: $VERDICT/$ROUTING -> $state  (model $REVIEW_MODEL, sha $head_sha)"
+  echo "review verdict: $VERDICT/$ROUTING -> $state  (reviewer $ACTIVE_REVIEWER, model $ACTIVE_MODEL, sha $head_sha)"
 else
-  echo "review verdict: $VERDICT -> $state  (model $REVIEW_MODEL, sha $head_sha)"
+  echo "review verdict: $VERDICT -> $state  (reviewer $ACTIVE_REVIEWER, model $ACTIVE_MODEL, sha $head_sha)"
 fi
 
 if [ "$POST" = 1 ]; then
@@ -151,7 +237,7 @@ if [ "$POST" = 1 ]; then
   fi
   desc="cross-model review: $VERDICT"
   [ -n "$ROUTING" ] && desc="$desc/$ROUTING"
-  desc="$desc; $REVIEW_MODEL"
+  desc="$desc; $ACTIVE_REVIEWER $ACTIVE_MODEL"
   "$HERE/post-status" --sha "$head_sha" --context review --state "$state" \
     --description "$desc" --repo "$REPO"
 fi

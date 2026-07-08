@@ -18,9 +18,15 @@ constitution: docs/CONSTITUTION.md
 agents:
   implementer:
     tool: codex                      # invoked as `codex exec`
-    # model / args overrides are optional and tool-specific
+    model: gpt-5.5                   # default unless the human explicitly overrides
+    effort: high
   reviewer:
     tool: claude                     # invoked locally as `claude -p` so it draws from the subscription window
+    model: claude-opus-4-8           # Opus 4.8
+    effort: max                      # Max effort for the gating review
+    fallback_tool: codex             # used only when Claude cannot run or cannot return a verdict
+    fallback_model: gpt-5.5
+    fallback_effort: xhigh
   advisory:                          # optional; remove the block to disable
     tool: gemini
     checks: [criteria-conformance, test-honesty]   # bounded, advisory-only

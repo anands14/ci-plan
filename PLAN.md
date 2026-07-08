@@ -30,10 +30,11 @@ The private repo can stay private: agents run on the Mac, write only to an agent
   Nothing reaches `main` without explicit human approval.
   Clean entries in the daily PR are glance-review candidates; flagged entries require real attention.
 - **Codex** (implementer) - writes code and tests from acceptance criteria.
-  Subscription-windowed, flat-rate; runs via `codex exec`.
+  Subscription-windowed, flat-rate; runs via `codex exec --model gpt-5.5 -c model_reasoning_effort="high"` by default.
 - **Claude** (gating reviewer) - the single authoritative automated reviewer.
-  Runs *locally* on the Mac via `claude -p --model claude-opus-4-8` so it draws from the 5-hour subscription window, not metered API.
-  `CLAUDE_REVIEW_MODEL` may override the exact model, but Opus 4.8 is the default gate.
+  Runs *locally* on the Mac via `claude -p --model claude-opus-4-8 --effort max` so it draws from the 5-hour subscription window, not metered API.
+  `CLAUDE_REVIEW_MODEL` may override the exact model, but Opus 4.8 Max is the default gate.
+  If Claude cannot run or cannot return a verdict, the wrapper falls back to Codex GPT-5.5 xhigh.
   Only ever reviews already-green code.
 - **Gemini** (advisory checker) - free credits.
   Bounded, advisory-only checks (acceptance-criteria conformance, test-honesty).
@@ -191,7 +192,7 @@ The autonomous loop cannot build itself, so Phase 0 is supervised and hands-on.
 ## 12. Residual risks (go in clear-eyed)
 
 - **Subscription terms.** Headless/automated use of subscription credits must remain permitted.
-  Per current understanding, `codex exec` and `claude -p --model claude-opus-4-8` draw from the 5-hour window when run locally and switch to API billing for CI/shared/untrusted runners - which is exactly why the agents run locally on the Mac.
+  Per current understanding, local `codex exec` and `claude -p --model claude-opus-4-8 --effort max` draw from the 5-hour window when run locally and switch to API billing for CI/shared/untrusted runners - which is exactly why the agents run locally on the Mac.
   Re-verify periodically.
 - **Glance review has risk.** Clean PRs are designed for quick validation, but flagged PRs must get real attention.
   Rubber-stamping flagged work deletes the main safety check.
@@ -209,7 +210,7 @@ The autonomous loop cannot build itself, so Phase 0 is supervised and hands-on.
 - **Isolation:** `treehouse`.
 - **Local gate:** `no-mistakes`.
 - **Spine:** GitHub (issues, PRs, labels, Actions CI, optional self-hosted wakeups).
-- **Agents:** Codex (`codex exec`), Claude (`claude -p --model claude-opus-4-8`), Gemini.
+- **Agents:** Codex (`codex exec --model gpt-5.5 -c model_reasoning_effort="high"`), Claude (`claude -p --model claude-opus-4-8 --effort max`), Gemini.
 - **Wakeups:** GitHub issue events via a self-hosted runner or equivalent lightweight wake path, plus periodic reconciliation polling.
 - **No tmux, no heavyweight framework, no Sandcastle adoption as the primary runner.**
 
@@ -275,4 +276,4 @@ Its templates lean toward broad agent-managed branch merging and same-family rev
 - The **advisory-Gemini** checks and the **flake firewall**.
 - The **token-free evening checklist** and the weekly-retro metrics.
 
-All of it sits on top of `treehouse` (isolation) plus `no-mistakes` (gate) plus GitHub (spine), driven by `codex exec` and `claude -p --model claude-opus-4-8` on local subscription windows.
+All of it sits on top of `treehouse` (isolation) plus `no-mistakes` (gate) plus GitHub (spine), driven by Codex GPT-5.5 high and Claude Opus 4.8 Max on local subscription windows.

@@ -35,6 +35,30 @@ class ProjectConfig:
         tail = self.repo.rstrip("/").split("/")[-1]
         return tail.removesuffix(".git")
 
+    @property
+    def implementer_model(self) -> str:
+        return _agent_string(self.raw, "implementer", "model", "gpt-5.5")
+
+    @property
+    def implementer_effort(self) -> str:
+        return _agent_string(self.raw, "implementer", "effort", "high")
+
+    @property
+    def reviewer_model(self) -> str:
+        return _agent_string(self.raw, "reviewer", "model", "claude-opus-4-8")
+
+    @property
+    def reviewer_effort(self) -> str:
+        return _agent_string(self.raw, "reviewer", "effort", "max")
+
+    @property
+    def reviewer_fallback_model(self) -> str:
+        return _agent_string(self.raw, "reviewer", "fallback_model", "gpt-5.5")
+
+    @property
+    def reviewer_fallback_effort(self) -> str:
+        return _agent_string(self.raw, "reviewer", "fallback_effort", "xhigh")
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -122,6 +146,22 @@ def _string(data: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"missing or invalid string: {key}")
     return value
+
+
+def _agent_string(
+    raw: dict[str, Any],
+    role: str,
+    key: str,
+    default: str,
+) -> str:
+    agents = raw.get("agents")
+    if not isinstance(agents, dict):
+        return default
+    config = agents.get(role)
+    if not isinstance(config, dict):
+        return default
+    value = config.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else default
 
 
 def _resolve_path(value: str, root: Path) -> Path:
