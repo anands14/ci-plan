@@ -32,11 +32,19 @@ class CheckResult:
     detail: str
 
 
-def build_worker_env(worker_home: Path, base: dict[str, str] | None = None) -> dict[str, str]:
+def build_worker_env(
+    worker_home: Path,
+    base: dict[str, str] | None = None,
+    *,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Return the env used for worker safety probes.
 
     Keep only non-secret process basics, force the dedicated HOME, and disable
     interactive credential prompts so push probes cannot borrow human auth.
+    `extra` carries the narrow set of secrets a specific tool invocation
+    needs (e.g. a headless CLI's own long-lived token) - never pulled from
+    ambient `os.environ`, only from a caller that read it from `.env` itself.
     """
 
     base = dict(base or os.environ)
@@ -47,7 +55,28 @@ def build_worker_env(worker_home: Path, base: dict[str, str] | None = None) -> d
     env["HOME"] = str(worker_home)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
+    if extra:
+        env.update(extra)
     return env
+
+
+def read_dotenv(root: Path) -> dict[str, str]:
+    """Parse the repo-root `.env` the same simple way `bin/post-status` sources
+    it: flat `KEY=value` lines, blank/comment lines ignored, no quoting or
+    escaping rules. Missing file returns an empty mapping.
+    """
+
+    path = root / ".env"
+    if not path.is_file():
+        return {}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip()
+    return values
 
 
 def orchestrator_token_names(config: ProjectConfig) -> set[str]:

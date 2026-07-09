@@ -9,7 +9,7 @@ import subprocess
 from typing import Any
 
 from . import github
-from .config import ProjectConfig
+from .config import ProjectConfig, env_token_prefix
 from .context import (
     append_handoff_entry,
     build_compact_brief,
@@ -18,7 +18,7 @@ from .context import (
 )
 from .ledger import RunLedgerEntry, update_run_entry
 from .outcomes import classify_summary
-from .preflight import build_worker_env
+from .preflight import build_worker_env, read_dotenv
 
 
 @dataclass(frozen=True)
@@ -168,6 +168,11 @@ def _implementer_runner_kwargs(config: ProjectConfig, lease_path: Path) -> dict[
     return {}
 
 
+def _claude_oauth_token_var(config: ProjectConfig) -> str:
+    """Same per-project prefixing as the GH tokens in .env (see bin/post-status)."""
+    return f"{env_token_prefix(config.name)}_AGENT_CLAUDE_OAUTH_TOKEN"
+
+
 def _extract_final_text(config: ProjectConfig, result: Any, result_path: Path) -> str:
     """Normalize each tool's structured-output shape to a single JSON text blob."""
     if config.implementer_tool == "claude":
@@ -221,12 +226,42 @@ def run_implementer_once(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
 
+    extra_env: dict[str, str] = {}
+    if config.implementer_tool == "claude":
+        token_var = _claude_oauth_token_var(config)
+        token = read_dotenv(config.root).get(token_var, "")
+        if not token:
+            summary = (
+                f"missing {token_var} in .env - headless `claude -p` under the "
+                f"worker HOME needs its own long-lived token, not the interactive "
+                f"keychain login. Run `HOME={config.worker_home} claude setup-token`, "
+                f"then add the printed token as {token_var}=<token> to .env."
+            )
+            update_run_entry(
+                config,
+                entry,
+                current_step="implementer-failed",
+                last_summary=summary,
+            )
+            return ImplementerRun(
+                command=command,
+                prompt_path=prompt_path,
+                result_path=result_path,
+                log_path=log_path,
+                head_before=head_before,
+                head_after=head_before,
+                codex_session_id=None,
+                summary=summary,
+                returncode=1,
+            )
+        extra_env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+
     result = runner(
         command,
         input=prompt,
         capture_output=True,
         text=True,
-        env=build_worker_env(config.worker_home),
+        env=build_worker_env(config.worker_home, extra=extra_env or None),
         **_implementer_runner_kwargs(config, lease_path),
     )
     log_path.write_text(result.stdout, encoding="utf-8")
