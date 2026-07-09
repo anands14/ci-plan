@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from contextlib import contextmanager
+import fcntl
 import json
 from pathlib import Path
 import subprocess
+import threading
 from typing import Any
 
 from . import github
@@ -17,8 +20,12 @@ from .context import (
     read_handoff_excerpt,
 )
 from .ledger import RunLedgerEntry, update_run_entry
-from .outcomes import classify_summary
+from .outcomes import classify_summary, should_consult_advisor
 from .preflight import build_worker_env, read_dotenv
+
+
+_CLI_LOCKS: dict[Path, threading.Lock] = {}
+_CLI_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -225,6 +232,7 @@ def run_implementer_once(
     result_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
+    result_path.unlink(missing_ok=True)
 
     extra_env: dict[str, str] = {}
     if config.implementer_tool == "claude":
@@ -256,14 +264,15 @@ def run_implementer_once(
             )
         extra_env["CLAUDE_CODE_OAUTH_TOKEN"] = token
 
-    result = runner(
-        command,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        env=build_worker_env(config.worker_home, extra=extra_env or None),
-        **_implementer_runner_kwargs(config, lease_path),
-    )
+    with _cli_invocation_lock(config):
+        result = runner(
+            command,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            env=build_worker_env(config.worker_home, extra=extra_env or None),
+            **_implementer_runner_kwargs(config, lease_path),
+        )
     log_path.write_text(result.stdout, encoding="utf-8")
     if result.stderr:
         with log_path.open("a", encoding="utf-8") as f:
@@ -293,7 +302,7 @@ def run_implementer_once(
     current_step = "implementer-ran" if result.returncode == 0 else "implementer-failed"
     if result.returncode != 0:
         classification = classify_summary(config, summary)
-        if classification.state == "stuck" and not _advisor_consulted:
+        if should_consult_advisor(summary) and not _advisor_consulted:
             return _consult_advisor_and_retry(
                 config,
                 entry,
@@ -304,14 +313,10 @@ def run_implementer_once(
                 github_client=github_client,
                 runner=runner,
             )
-        if classification.state in {"stuck", "deferred"}:
-            current_step = classification.state
-            github_client.set_state(
-                config.repo,
-                entry.issue_number,
-                classification.state,
-                ["in-progress", "in-review"],
-            )
+        if classification.state in {"stuck", "operator-blocked", "deferred"}:
+            current_step = "stuck" if classification.state == "operator-blocked" else classification.state
+            state_label = "stuck" if classification.state == "operator-blocked" else classification.state
+            github_client.set_state(config.repo, entry.issue_number, state_label, ["in-progress", "in-review"])
     if result.returncode == 0:
         append_handoff_entry(
             config,
@@ -486,8 +491,54 @@ def compact_summary(final_text: str, jsonl: str, returncode: int) -> str:
         return parsed["summary"][:1000]
     text = final_text.strip()
     if not text:
+        text = _jsonl_error_message(jsonl)
+    if not text:
         text = f"codex exec exited with status {returncode}"
     return " ".join(text.split())[:1000]
+
+
+@contextmanager
+def _cli_invocation_lock(config: ProjectConfig):
+    if config.implementer_tool != "codex":
+        yield
+        return
+
+    lock_path = config.worker_home / ".codex-exec.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    in_process_lock = _in_process_lock(lock_path)
+    with in_process_lock:
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _in_process_lock(lock_path: Path) -> threading.Lock:
+    resolved = lock_path.resolve()
+    with _CLI_LOCKS_GUARD:
+        lock = _CLI_LOCKS.get(resolved)
+        if lock is None:
+            lock = threading.Lock()
+            _CLI_LOCKS[resolved] = lock
+        return lock
+
+
+def _jsonl_error_message(jsonl: str) -> str:
+    for line in reversed(jsonl.splitlines()):
+        event = _maybe_json(line)
+        if not isinstance(event, dict):
+            continue
+        message = event.get("message")
+        if isinstance(message, str) and message.strip():
+            return message
+        error = event.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                return message
+    return ""
 
 
 def build_feedback_context(config: ProjectConfig, entry: RunLedgerEntry) -> str | None:

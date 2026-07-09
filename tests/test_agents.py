@@ -1,6 +1,8 @@
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 
 from orchestrator.agents import (
@@ -258,6 +260,136 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(handoff.is_file())
             self.assertIn("issue #7", handoff.read_text(encoding="utf-8"))
             self.assertIn("implemented the task", handoff.read_text(encoding="utf-8"))
+
+    def test_failed_codex_run_ignores_stale_result_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed_framework(root)
+            (root / "lease").mkdir()
+            config = config_for(root)
+            entry = entry_for(root)
+            write_run_entry(config, entry)
+            stale_result = root / ".orchestrator" / "results" / "sample" / "issue-7-implementer.json"
+            stale_result.parent.mkdir(parents=True, exist_ok=True)
+            stale_result.write_text('{"summary": "old success"}', encoding="utf-8")
+
+            def fake_runner(command, input, capture_output, text, env):
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    stdout='{"type":"error","message":"fresh auth failure"}\n',
+                    stderr="",
+                )
+
+            result = run_implementer_once(
+                config,
+                entry,
+                github_client=FakeGitHub(),
+                runner=fake_runner,
+            )
+
+            updated = read_run_entry(config, 7)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(updated.last_summary, "fresh auth failure")
+            self.assertEqual(updated.current_step, "stuck")
+
+    def test_ambiguous_failed_run_consults_advisor_once_then_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed_framework(root)
+            (root / "lease").mkdir()
+            config = config_for(root)
+            entry = entry_for(root)
+            write_run_entry(config, entry)
+            calls = {"implementer": 0, "advisor": 0}
+
+            def fake_runner(command, *args, **kwargs):
+                if command[0].endswith("bin/advise"):
+                    calls["advisor"] += 1
+                    return subprocess.CompletedProcess(command, 0, stdout="Retry with narrower context.", stderr="")
+                calls["implementer"] += 1
+                result_index = command.index("--output-last-message") + 1
+                Path(command[result_index]).parent.mkdir(parents=True, exist_ok=True)
+                if calls["implementer"] == 1:
+                    Path(command[result_index]).write_text(
+                        '{"success": false, "summary": "tool exited without a clear reason"}',
+                        encoding="utf-8",
+                    )
+                    return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+                Path(command[result_index]).write_text(
+                    '{"success": true, "summary": "recovered after advisor guidance"}',
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            result = run_implementer_once(
+                config,
+                entry,
+                github_client=FakeGitHub(),
+                runner=fake_runner,
+            )
+
+            updated = read_run_entry(config, 7)
+            self.assertEqual(calls, {"implementer": 2, "advisor": 1})
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(updated.current_step, "implementer-ran")
+            self.assertEqual(updated.last_summary, "recovered after advisor guidance")
+
+    def test_codex_runs_share_worker_home_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed_framework(root)
+            (root / "lease-7").mkdir()
+            (root / "lease-8").mkdir()
+            config = config_for(root)
+            entry_7 = entry_for(root)
+            entry_8 = RunLedgerEntry(
+                project="sample",
+                repo="owner/sample",
+                issue_number=8,
+                issue_title="Implement another thing",
+                lease_path=str(root / "lease-8"),
+                current_step="claimed",
+                log_path=str(root / ".orchestrator" / "logs" / "sample" / "issue-8.log"),
+                claimed_at="2026-07-02T00:00:00+00:00",
+            )
+            entry_7 = RunLedgerEntry(**{**entry_7.__dict__, "lease_path": str(root / "lease-7")})
+            write_run_entry(config, entry_7)
+            write_run_entry(config, entry_8)
+            active = 0
+            max_active = 0
+            observed_lock = threading.Lock()
+
+            def fake_runner(command, input, capture_output, text, env):
+                nonlocal active, max_active
+                with observed_lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                result_index = command.index("--output-last-message") + 1
+                Path(command[result_index]).parent.mkdir(parents=True, exist_ok=True)
+                Path(command[result_index]).write_text(
+                    '{"success": true, "summary": "done"}',
+                    encoding="utf-8",
+                )
+                with observed_lock:
+                    active -= 1
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            threads = [
+                threading.Thread(
+                    target=run_implementer_once,
+                    args=(config, entry),
+                    kwargs={"github_client": FakeGitHub(), "runner": fake_runner},
+                )
+                for entry in (entry_7, entry_8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(max_active, 1)
 
     def test_successful_run_with_uncommitted_work_creates_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:

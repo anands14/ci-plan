@@ -139,6 +139,39 @@ class RunTickTests(unittest.TestCase):
             self.assertEqual(result.pipeline_results, [])
             self.assertEqual(result.integrated, [])
 
+    def test_pipeline_exception_is_reported_per_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = config_for(root)
+            github_client = FakeGitHub(
+                [
+                    {"number": 1, "title": "one", "body": body_for("a")},
+                    {"number": 2, "title": "two", "body": body_for("b")},
+                ]
+            )
+
+            def fake_pipeline(config, issue_number, *, github_client=None):
+                if issue_number == 1:
+                    raise RuntimeError("agent crashed")
+                return _result(issue_number)
+
+            def fake_lease(config, number):
+                path = root / f"lease-{number}"
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+
+            result = run_tick(
+                config,
+                github_client=github_client,
+                pipeline_runner=fake_pipeline,
+                lease_func=fake_lease,
+                release_func=lambda path: None,
+            )
+
+            summaries = {item.issue_number: item.summary for item in result.pipeline_results}
+            self.assertIn("agent crashed", summaries[1])
+            self.assertEqual(summaries[2], "ok")
+
 
 def _result(issue_number):
     from orchestrator.tick import IssuePipelineResult

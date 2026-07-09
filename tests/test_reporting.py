@@ -4,7 +4,7 @@ import unittest
 
 from orchestrator.config import ProjectConfig
 from orchestrator.ledger import RunLedgerEntry, write_run_entry
-from orchestrator.reporting import evening_report
+from orchestrator.reporting import evening_report, watch_report
 
 
 class FakeGitHub:
@@ -80,6 +80,25 @@ class ReportingTests(unittest.TestCase):
             self.assertIn("blocked on external input", report)
             self.assertIn("## deferred tasks", report)
             self.assertIn("window share reached", report)
+
+    def test_watch_report_emits_local_run_table_without_github(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = config_for(root)
+            config.raw["agents"] = {"implementer": {"model": "gpt-5.5"}}
+            write_entry(root, 7, "implementer-failed", pr_number=None, last_summary="auth failed")
+            write_entry(root, 8, "review-passed", review_summary="review approve/clean")
+
+            report = watch_report(config)
+
+            self.assertIn("Issue", report)
+            self.assertIn("#7", report)
+            self.assertIn("implementer-failed", report)
+            self.assertIn("gpt-5.5", report)
+            self.assertIn("auth failed", report)
+            self.assertIn("#8", report)
+            self.assertIn("reviewer", report)
+            self.assertIn("review approve/clean", report)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,24 @@ STUCK_PATTERNS = (
     "requires human input",
     "cannot proceed without",
 )
+OPERATOR_BLOCKED_PATTERNS = (
+    "access token",
+    "api_error_status",
+    "auth failed",
+    "auth failure",
+    "authentication",
+    "could not resolve host",
+    "login",
+    "not logged in",
+    "permission denied",
+    "rate limit",
+    "refresh token",
+    "session limit",
+    "token_expired",
+    "unauthorized",
+    "401",
+    "429",
+)
 DEFERRED_PATTERNS = (
     "window share",
     "window-share",
@@ -43,8 +61,11 @@ class ResumeResult:
     summary: str
 
 
-def classify_summary(config: ProjectConfig, summary: str | None) -> OutcomeClassification:
+def classify_summary(config: ProjectConfig | None, summary: str | None) -> OutcomeClassification:
     text = (summary or "").lower()
+    for pattern in OPERATOR_BLOCKED_PATTERNS:
+        if pattern in text:
+            return OutcomeClassification("operator-blocked", _short(summary))
     for pattern in STUCK_PATTERNS:
         if pattern in text:
             return OutcomeClassification("stuck", _short(summary))
@@ -52,6 +73,15 @@ def classify_summary(config: ProjectConfig, summary: str | None) -> OutcomeClass
         if pattern in text:
             return OutcomeClassification("deferred", _short(summary))
     return OutcomeClassification("continue", None)
+
+
+def should_consult_advisor(summary: str | None) -> bool:
+    """Use advisor tokens only where advice could plausibly change the next turn."""
+    text = (summary or "").strip()
+    if not text:
+        return True
+    classification = classify_summary(None, text)
+    return classification.state in {"continue", "stuck"}
 
 
 def resume_deferred(

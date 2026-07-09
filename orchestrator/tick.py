@@ -105,7 +105,11 @@ def run_tick(
                 for number in claimed_numbers
             }
             for future in as_completed(futures):
-                pipeline_results.append(future.result())
+                number = futures[future]
+                try:
+                    pipeline_results.append(future.result())
+                except Exception as exc:
+                    pipeline_results.append(IssuePipelineResult(number, "pipeline", f"failed: {exc}"))
 
     integrated: list[int] = []
     if not dry_run:

@@ -17,8 +17,8 @@ constitution: docs/CONSTITUTION.md
 
 agents:
   implementer:
-    model: claude-sonnet-5             # tool inferred: claude
-    effort: max
+    model: gpt-5.5                     # tool inferred: codex
+    effort: high
   reviewer:
     model: gpt-5.5                    # tool inferred: codex
     effort: high

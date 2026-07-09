@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
 
 from . import github
 from .config import ProjectConfig
@@ -19,6 +20,17 @@ class EveningRow:
     check_state: str
     routing: str
     reason: str
+
+
+@dataclass(frozen=True)
+class WatchRow:
+    issue_number: int
+    current_step: str
+    agent: str
+    model: str
+    pr_number: int | None
+    lease: str
+    summary: str
 
 
 def evening_rows(config: ProjectConfig, *, github_client=github) -> list[EveningRow]:
@@ -72,6 +84,51 @@ def evening_report(config: ProjectConfig, *, github_client=github) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def watch_rows(config: ProjectConfig) -> list[WatchRow]:
+    rows = []
+    for entry in sorted(_entries_by_issue(config).values(), key=lambda item: item.issue_number):
+        agent, model = _agent_for_step(config, entry.current_step)
+        rows.append(
+            WatchRow(
+                issue_number=entry.issue_number,
+                current_step=entry.current_step,
+                agent=agent,
+                model=model,
+                pr_number=entry.pr_number,
+                lease=_short_path(entry.lease_path),
+                summary=_short_reason(entry, limit=120),
+            )
+        )
+    return rows
+
+
+def watch_report(config: ProjectConfig) -> str:
+    rows = watch_rows(config)
+    if not rows:
+        return "No orchestrator runs recorded.\n"
+
+    headers = ("Issue", "Step", "Agent", "Model", "PR", "Lease", "Summary")
+    values = [
+        (
+            f"#{row.issue_number}",
+            row.current_step,
+            row.agent,
+            row.model,
+            f"#{row.pr_number}" if row.pr_number else "-",
+            row.lease,
+            row.summary,
+        )
+        for row in rows
+    ]
+    widths = [
+        max(len(headers[index]), *(len(value[index]) for value in values))
+        for index in range(len(headers))
+    ]
+    lines = [_format_watch_row(headers, widths), _format_watch_row(tuple("-" * width for width in widths), widths)]
+    lines.extend(_format_watch_row(value, widths) for value in values)
+    return "\n".join(lines) + "\n"
+
+
 def _entries_by_issue(config: ProjectConfig) -> dict[int, RunLedgerEntry]:
     runs_dir = config.root / ".orchestrator" / "runs"
     if not runs_dir.is_dir():
@@ -82,6 +139,30 @@ def _entries_by_issue(config: ProjectConfig) -> dict[int, RunLedgerEntry]:
         entry = RunLedgerEntry(**data)
         entries[entry.issue_number] = entry
     return entries
+
+
+def _agent_for_step(config: ProjectConfig, step: str) -> tuple[str, str]:
+    if step.startswith("review"):
+        return "reviewer", config.reviewer_model
+    if step.startswith("sim-validation"):
+        return "orchestrator", "deterministic"
+    if step.startswith("gate") or step.startswith("handoff") or step.startswith("integration"):
+        return "orchestrator", "deterministic"
+    if step.startswith("advisor"):
+        return "advisor", config.advisor_model
+    return "implementer", config.implementer_model
+
+
+def _short_path(value: str) -> str:
+    path = Path(value)
+    parts = path.parts
+    if len(parts) <= 3:
+        return value
+    return str(Path("...") / Path(*parts[-3:]))
+
+
+def _format_watch_row(values: tuple[str, ...], widths: list[int]) -> str:
+    return "  ".join(value.ljust(widths[index]) for index, value in enumerate(values))
 
 
 def _bucket(entry: RunLedgerEntry, item: ReconcileItem) -> str | None:

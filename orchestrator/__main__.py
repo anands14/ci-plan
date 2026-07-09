@@ -23,7 +23,7 @@ from .outcomes import resume_deferred
 from .preflight import failed, format_results, run_preflight
 from .queueing import advance_ready_frontier, claim_all_ready, claim_next_ready
 from .reconcile import reconcile, record_wakeup
-from .reporting import evening_report
+from .reporting import evening_report, watch_report
 from .safety import ADVANCING_COMMANDS, is_paused, pause_message
 from .tick import run_tick
 from .validation import run_review, run_sim_validation
@@ -193,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
         help="run Phase 0c M10: emit the token-free evening checklist",
     )
     evening.add_argument("--project", required=True)
+    watch = subparsers.add_parser(
+        "watch",
+        help="show token-free local orchestrator run status",
+    )
+    watch.add_argument("--project", required=True)
     concurrency = subparsers.add_parser(
         "concurrency",
         help="run Phase 0c M11: inspect or set the staged concurrency guardrail",
@@ -529,6 +534,13 @@ def main(argv: list[str] | None = None) -> int:
             print(evening_report(config), end="")
         except Exception as exc:
             print(f"FAIL evening-report - {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "watch":
+        try:
+            print(watch_report(config), end="")
+        except Exception as exc:
+            print(f"FAIL watch - {exc}", file=sys.stderr)
             return 1
         return 0
     if args.command == "concurrency":

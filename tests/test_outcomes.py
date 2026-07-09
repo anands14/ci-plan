@@ -4,7 +4,7 @@ import unittest
 
 from orchestrator.config import ProjectConfig
 from orchestrator.ledger import RunLedgerEntry, read_run_entry, write_run_entry
-from orchestrator.outcomes import classify_summary, resume_deferred
+from orchestrator.outcomes import classify_summary, resume_deferred, should_consult_advisor
 
 
 class FakeGitHub:
@@ -35,6 +35,13 @@ class OutcomeTests(unittest.TestCase):
 
         self.assertEqual(classify_summary(config, "Spec is unclear").state, "stuck")
         self.assertEqual(classify_summary(config, "Window share ceiling reached").state, "deferred")
+        self.assertEqual(classify_summary(config, "Provided authentication token is expired").state, "operator-blocked")
+
+    def test_advisor_consult_skips_operator_and_deferred_failures(self):
+        self.assertTrue(should_consult_advisor("tool exited without a clear reason"))
+        self.assertTrue(should_consult_advisor("Spec is unclear"))
+        self.assertFalse(should_consult_advisor("Window share ceiling reached"))
+        self.assertFalse(should_consult_advisor("Your access token could not be refreshed"))
 
     def test_resume_deferred_preserves_lease_and_sets_in_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
