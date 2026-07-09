@@ -46,6 +46,8 @@ class RunLedgerEntry:
     integration_head_sha: str | None = None
     integration_revert_sha: str | None = None
     worker_pid: int | None = None
+    advisor_question: str | None = None
+    advisor_summary: str | None = None
 
 
 def make_run_entry(

@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 
 from .agents import checkpoint_entry, run_implementer_once
 from .cadence import daily_report, run_nightly_e2e, weekly_retro
@@ -20,10 +21,11 @@ from .integration import ensure_daily_branch, integrate_next_approved, integrate
 from .ledger import read_run_entry
 from .outcomes import resume_deferred
 from .preflight import failed, format_results, run_preflight
-from .queueing import claim_next_ready
+from .queueing import advance_ready_frontier, claim_all_ready, claim_next_ready
 from .reconcile import reconcile, record_wakeup
 from .reporting import evening_report
 from .safety import ADVANCING_COMMANDS, is_paused, pause_message
+from .tick import run_tick
 from .validation import run_review, run_sim_validation
 
 
@@ -53,9 +55,39 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="show queue decisions without editing labels, leasing, or writing ledger",
     )
+    advance_frontier = subparsers.add_parser(
+        "advance-frontier",
+        help="promote blocked issues to ready once every #N blocker they declare is closed",
+    )
+    advance_frontier.add_argument("--project", required=True)
+    advance_frontier.add_argument("--dry-run", action="store_true")
+    claim_all = subparsers.add_parser(
+        "claim-all",
+        help="claim every currently-safe ready issue - no fixed worker-count cap",
+    )
+    claim_all.add_argument("--project", required=True)
+    claim_all.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show claim/defer/reject decisions without editing labels, leasing, or writing ledger",
+    )
+    run = subparsers.add_parser(
+        "run",
+        help="one full tick (advance frontier, claim-all, implement+gate+handoff+sim-validate+review "
+        "in parallel, then serially integrate) - or loop until nothing is left with --poll",
+    )
+    run.add_argument("--project", required=True)
+    run.add_argument("--dry-run", action="store_true")
+    run.add_argument(
+        "--poll",
+        action="store_true",
+        help="keep ticking until a tick claims and integrates nothing, instead of running once",
+    )
+    run.add_argument("--poll-seconds", type=float, default=30.0)
+    run.add_argument("--max-ticks", type=int, default=None)
     run_implementer = subparsers.add_parser(
         "run-implementer",
-        help="run Phase 0c M2: one bounded Codex implementer step",
+        help="run Phase 0c M2: one bounded implementer step (tool inferred from the configured model)",
     )
     run_implementer.add_argument("--project", required=True)
     run_implementer.add_argument("--issue", required=True, type=int)
@@ -100,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     sim_validation.add_argument("--post", action="store_true")
     review = subparsers.add_parser(
         "review",
-        help="run Phase 0c M6: final-SHA Claude review and routing",
+        help="run Phase 0c M6: final-SHA review and routing (tool inferred from the configured model)",
     )
     review.add_argument("--project", required=True)
     review.add_argument("--issue", required=True, type=int)
@@ -232,6 +264,65 @@ def main(argv: list[str] | None = None) -> int:
             print(f"issue #{number} routed to {label}:")
             for reason in reasons:
                 print(f"  - {reason}")
+        return 0
+    if args.command == "advance-frontier":
+        try:
+            promoted = advance_ready_frontier(config, dry_run=args.dry_run)
+        except Exception as exc:
+            print(f"FAIL advance-frontier - {exc}", file=sys.stderr)
+            return 1
+        if promoted:
+            for number in promoted:
+                print(f"issue #{number}: blocked -> ready (every declared blocker is closed)")
+        else:
+            print("no blocked issue is ready to promote")
+        return 0
+    if args.command == "claim-all":
+        try:
+            result = claim_all_ready(config, dry_run=args.dry_run)
+        except Exception as exc:
+            print(f"FAIL claim-all - {exc}", file=sys.stderr)
+            return 1
+        for action in result.actions:
+            print(action)
+        for number in result.deferred:
+            print(f"issue #{number}: deferred (scope overlaps in-flight or already-claimed work)")
+        for number, label, reasons in result.rejected:
+            print(f"issue #{number} routed to {label}:")
+            for reason in reasons:
+                print(f"  - {reason}")
+        print(f"claimed {len(result.claimed)} issue(s): {[c.issue_number for c in result.claimed]}")
+        return 0
+    if args.command == "run":
+        try:
+            ticks = 0
+            while True:
+                result = run_tick(config, dry_run=args.dry_run)
+                ticks += 1
+                if result.promoted:
+                    print(f"promoted: {result.promoted}")
+                if result.claimed:
+                    print(f"claimed: {result.claimed}")
+                if result.deferred:
+                    print(f"deferred: {result.deferred}")
+                for pipeline_result in result.pipeline_results:
+                    print(
+                        f"issue #{pipeline_result.issue_number} stopped at {pipeline_result.stage}: "
+                        f"{pipeline_result.summary}"
+                    )
+                if result.integrated:
+                    print(f"integrated: {result.integrated}")
+                if not args.poll:
+                    break
+                if args.max_ticks and ticks >= args.max_ticks:
+                    break
+                if not (result.promoted or result.claimed or result.integrated):
+                    print(f"nothing to do; sleeping {args.poll_seconds}s")
+                    time.sleep(args.poll_seconds)
+                    continue
+        except Exception as exc:
+            print(f"FAIL run - {exc}", file=sys.stderr)
+            return 1
         return 0
     if args.command == "run-implementer":
         try:

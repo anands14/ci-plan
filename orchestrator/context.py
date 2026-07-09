@@ -69,8 +69,11 @@ def build_compact_brief(config: ProjectConfig) -> str:
             "## Scoped Tests",
             _scoped_test_guidance(config),
             "",
+            "## Advisor",
+            "stuck or unsure and it is not a human-only call? set advisor_request: {question, context} instead of guessing or escalating; you get one answer, then decide.",
+            "",
             "## JSON",
-            "return keys: success, summary, key_changes, tests_added, tests_run, touched_files, new_apis, decisions, gotchas, deviations, uncertainties, escalation.",
+            "return keys: success, summary, key_changes, tests_added, tests_run, touched_files, new_apis, decisions, gotchas, deviations, uncertainties, escalation, advisor_request.",
         ]
     )
 

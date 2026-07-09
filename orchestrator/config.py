@@ -16,6 +16,36 @@ class ConfigError(RuntimeError):
     """Raised when a project config is missing, malformed, or unreadable."""
 
 
+# Prefix -> CLI tool. A role's tool is inferred from its model name unless the
+# project config sets an explicit `tool:` override (for a model available on
+# more than one CLI, or a provider this table doesn't know yet).
+TOOL_INFERENCE: tuple[tuple[str, str], ...] = (
+    ("claude-", "claude"),
+    ("fable-", "claude"),
+    ("mythos-", "claude"),
+    ("gpt-", "codex"),
+    ("o1", "codex"),
+    ("o3", "codex"),
+    ("gemini-", "gemini"),
+)
+
+
+def infer_tool(model: str) -> str:
+    """Resolve which CLI runs a given model, absent an explicit override.
+
+    No role is fixed to a specific tool: any role's `model` determines its
+    tool, so pointing implementer/reviewer/advisor at any configured model
+    just works without bespoke per-role invocation code.
+    """
+    lowered = model.strip().lower()
+    for prefix, tool in TOOL_INFERENCE:
+        if lowered.startswith(prefix):
+            return tool
+    raise ConfigError(
+        f"cannot infer tool for model {model!r}; add an explicit tool: override"
+    )
+
+
 @dataclass(frozen=True)
 class ProjectConfig:
     """Validated subset of `projects/<name>.yaml` needed by early milestones."""
@@ -44,6 +74,10 @@ class ProjectConfig:
         return _agent_string(self.raw, "implementer", "effort", "high")
 
     @property
+    def implementer_tool(self) -> str:
+        return _agent_tool(self.raw, "implementer", self.implementer_model)
+
+    @property
     def reviewer_model(self) -> str:
         return _agent_string(self.raw, "reviewer", "model", "claude-opus-4-8")
 
@@ -52,12 +86,32 @@ class ProjectConfig:
         return _agent_string(self.raw, "reviewer", "effort", "max")
 
     @property
+    def reviewer_tool(self) -> str:
+        return _agent_tool(self.raw, "reviewer", self.reviewer_model)
+
+    @property
     def reviewer_fallback_model(self) -> str:
         return _agent_string(self.raw, "reviewer", "fallback_model", "gpt-5.5")
 
     @property
     def reviewer_fallback_effort(self) -> str:
         return _agent_string(self.raw, "reviewer", "fallback_effort", "xhigh")
+
+    @property
+    def reviewer_fallback_tool(self) -> str:
+        return _agent_tool(self.raw, "reviewer", self.reviewer_fallback_model, key="fallback_tool")
+
+    @property
+    def advisor_model(self) -> str:
+        return _agent_string(self.raw, "advisor", "model", self.reviewer_model)
+
+    @property
+    def advisor_effort(self) -> str:
+        return _agent_string(self.raw, "advisor", "effort", "high")
+
+    @property
+    def advisor_tool(self) -> str:
+        return _agent_tool(self.raw, "advisor", self.advisor_model)
 
 
 def repo_root() -> Path:
@@ -162,6 +216,17 @@ def _agent_string(
         return default
     value = config.get(key)
     return value.strip() if isinstance(value, str) and value.strip() else default
+
+
+def _agent_tool(raw: dict[str, Any], role: str, model: str, key: str = "tool") -> str:
+    """A role's CLI: an explicit config override, else inferred from its model."""
+    agents = raw.get("agents")
+    config = agents.get(role) if isinstance(agents, dict) else None
+    if isinstance(config, dict):
+        value = config.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return infer_tool(model)
 
 
 def _resolve_path(value: str, root: Path) -> Path:

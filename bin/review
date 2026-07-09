@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
-# review - the orchestrator's cross-model review step. Runs the reviewer (a
-# DIFFERENT model than the implementer) over the PR's FINAL SHA + diff + the
-# issue's acceptance criteria, then posts the `review` commit status. Green CI
-# is necessary but never sufficient; this is the other half of the gate.
+# review - the orchestrator's cross-model review step. Runs the reviewer over
+# the PR's FINAL SHA + diff + the issue's acceptance criteria, then posts the
+# `review` commit status. Green CI is necessary but never sufficient; this is
+# the other half of the gate.
 #
-# The reviewer tries Claude locally first so it stays on the subscription
-# window. If Claude cannot run or cannot return a verdict, the wrapper falls
-# back to Codex using the configured fallback model and effort.
+# The reviewer's tool is generic: --tool picks claude or codex explicitly, or
+# it is inferred from --model (same rule as orchestrator/config.py:infer_tool)
+# so no role is hardcoded to a specific CLI. If the primary tool cannot run or
+# cannot return a verdict, the wrapper falls back to the configured fallback
+# model/tool.
+#
+# If the reviewer's own JSON includes a non-null `advisor_request`, this
+# script consults the advisor once (via bin/advise) and re-runs the SAME
+# reviewer one more time with the advisor's answer as feedback - one bounded
+# round-trip, never a second review pass in the human-visible sense.
 #
 # Usage: review --pr <pr> [--repo owner/name] [--skill <path>] [--issue <n>]
-#               [--model <claude-model>] [--effort max] [--dry-run]
-#               [--fallback-model <codex-model>] [--fallback-effort xhigh]
-#               [--test-verdict approve|request-changes] [--test-routing clean|flagged]
+#               [--model <model>] [--effort max] [--tool codex|claude]
+#               [--fallback-model <model>] [--fallback-effort xhigh] [--fallback-tool codex|claude]
+#               [--advisor-model <model>] [--advisor-effort high] [--advisor-tool codex|claude]
+#               [--dry-run] [--test-verdict approve|request-changes] [--test-routing clean|flagged]
 #               [--post]
 set -euo pipefail
 
@@ -19,12 +27,15 @@ REPO="anands14/tovi"
 SKILL="$(cd "$(dirname "$0")/.." && pwd)/skills/pipeline-reviewer/SKILL.md"
 REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-claude-opus-4-8}"
 REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-max}"
+REVIEW_TOOL=""
 FALLBACK_MODEL="${CODEX_REVIEW_FALLBACK_MODEL:-gpt-5.5}"
 FALLBACK_EFFORT="${CODEX_REVIEW_FALLBACK_EFFORT:-xhigh}"
+FALLBACK_TOOL=""
+ADVISOR_MODEL="" ADVISOR_EFFORT="high" ADVISOR_TOOL=""
 PR="" DRY=0 POST=0 VERDICT="" ROUTING="" TEST_VERDICT=0 ISSUE=""
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ACTIVE_REVIEWER="claude"
-ACTIVE_MODEL="$REVIEW_MODEL"
+ACTIVE_REVIEWER="" ACTIVE_MODEL=""
+ADVISOR_CONSULTED=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,14 +45,19 @@ while [ $# -gt 0 ]; do
     --issue) ISSUE="$2"; shift 2 ;;
     --model) REVIEW_MODEL="$2"; shift 2 ;;
     --effort) REVIEW_EFFORT="$2"; shift 2 ;;
+    --tool) REVIEW_TOOL="$2"; shift 2 ;;
     --fallback-model) FALLBACK_MODEL="$2"; shift 2 ;;
     --fallback-effort) FALLBACK_EFFORT="$2"; shift 2 ;;
+    --fallback-tool) FALLBACK_TOOL="$2"; shift 2 ;;
+    --advisor-model) ADVISOR_MODEL="$2"; shift 2 ;;
+    --advisor-effort) ADVISOR_EFFORT="$2"; shift 2 ;;
+    --advisor-tool) ADVISOR_TOOL="$2"; shift 2 ;;
     --test-verdict) VERDICT="$2"; TEST_VERDICT=1; shift 2 ;;
     --test-routing) ROUTING="$2"; shift 2 ;;
     --verdict) echo "--verdict was replaced by --test-verdict and cannot post statuses" >&2; exit 2 ;;
     --dry-run) DRY=1; shift ;;
     --post) POST=1; shift ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -50,6 +66,23 @@ if [ "$TEST_VERDICT" = 1 ] && [ "$POST" = 1 ]; then
   echo "--test-verdict may not be combined with --post; use it only for no-status script tests." >&2
   exit 2
 fi
+
+# Same tool-inference rule as orchestrator/config.py:infer_tool - a role's CLI
+# comes from its model name unless an explicit tool override is given.
+infer_tool_from_model() {
+  local model_lower
+  model_lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$model_lower" in
+    claude-*|fable-*|mythos-*) echo "claude" ;;
+    gpt-*|o1*|o3*) echo "codex" ;;
+    gemini-*) echo "gemini" ;;
+    *) echo "cannot infer tool for model '$1'; pass a --*-tool override" >&2; exit 2 ;;
+  esac
+}
+[ -n "$REVIEW_TOOL" ] || REVIEW_TOOL="$(infer_tool_from_model "$REVIEW_MODEL")"
+[ -n "$FALLBACK_TOOL" ] || FALLBACK_TOOL="$(infer_tool_from_model "$FALLBACK_MODEL")"
+[ -n "$ADVISOR_MODEL" ] || ADVISOR_MODEL="$REVIEW_MODEL"
+[ -n "$ADVISOR_TOOL" ] || ADVISOR_TOOL="$(infer_tool_from_model "$ADVISOR_MODEL")"
 
 extract_reviewer_field() {
   local field="$1" text="$2" value=""
@@ -76,6 +109,11 @@ extract_reviewer_field() {
     sed -E 's/^[^:]+:[[:space:]]*"([^"]+)".*$/\1/'
 }
 
+extract_reviewer_object() {
+  local field="$1" text="$2"
+  printf '%s' "$text" | jq -c --arg field "$field" 'try .[$field] catch null' 2>/dev/null || true
+}
+
 # Review inputs: the FINAL head SHA (Q2 - always re-review the exact SHA), the
 # diff, and the PR body (which carries the criteria-coverage + the implementer's
 # notes per the PR template). The linked issue's acceptance criteria are the
@@ -97,7 +135,26 @@ issue_json="$(gh issue view "$ISSUE" -R "$REPO" --json number,title,body)"
 issue_title="$(printf '%s\n' "$issue_json" | jq -r .title)"
 issue_body="$(printf '%s\n' "$issue_json" | jq -r .body)"
 
-prompt="$(cat "$SKILL" 2>/dev/null || echo '[pipeline-reviewer role skill]')
+# Condensed from CONSTITUTION.md so the reviewer does not need a full re-read
+# (or a re-read of the project's AGENTS.md/CLAUDE.md) on every invocation -
+# this runs from the framework repo's cwd, so those files are not auto-loaded
+# the way they would be for a `claude -p` run inside the target checkout.
+reviewer_invariants="$(cat <<'EOF'
+## Standing invariants (condensed; do not assume the full constitution was auto-loaded)
+
+- Only a human merges to the default branch; you approve or request changes, you never merge.
+- Tests must come from the acceptance criteria, not invented by the implementer to match its own code; flag any test that was weakened, skipped, or deleted.
+- A user-facing change needs E2E at its declared level run on a credible real target, or a loud, named e2e-exempt reason - never a silent default.
+- No agent may edit a protected path (this constitution, CI/gate config, branch-protection config, the project constitution) without declared, justified risk.
+- Conventions may be deviated from, but only loudly - declared and reasoned in the PR. Silent deviation is the one forbidden thing.
+- Route every approval as clean (glance-review candidate) or flagged (protected-path/test-discipline override, deviation, architecture tradeoff, UX uncertainty, suspicious test, or stuck history - needs real human attention).
+- Stuck or unsure and it is not a human-only call? set advisor_request: {question, context} instead of guessing - you get one answer, then decide.
+EOF
+)"
+
+base_prompt="$(cat "$SKILL" 2>/dev/null || echo '[pipeline-reviewer role skill]')
+
+$reviewer_invariants
 
 Review this PR on its FINAL SHA ($head_sha). Green CI is necessary, not
 sufficient. Judge any test-assertion change against the acceptance criteria,
@@ -113,10 +170,12 @@ $body
 
 --- diff ---
 $diff"
+prompt="$base_prompt"
 
 if [ "$DRY" = 1 ]; then
-  echo "Would review PR #$PR @ $head_sha against issue #$ISSUE via Claude model $REVIEW_MODEL/$REVIEW_EFFORT."
-  echo "Fallback reviewer: Codex model $FALLBACK_MODEL/$FALLBACK_EFFORT."
+  echo "Would review PR #$PR @ $head_sha via $REVIEW_TOOL model $REVIEW_MODEL/$REVIEW_EFFORT."
+  echo "Fallback reviewer: $FALLBACK_TOOL model $FALLBACK_MODEL/$FALLBACK_EFFORT."
+  echo "Advisor (on request): $ADVISOR_TOOL model $ADVISOR_MODEL/$ADVISOR_EFFORT."
   echo "Prompt assembled: ${#prompt} bytes (skill + final-SHA instruction + issue + body + diff)."
   exit 0
 fi
@@ -126,6 +185,7 @@ parse_reviewer_payload() {
   local payload="$2"
   VERDICT="$(extract_reviewer_field verdict "$payload")"
   ROUTING="$(extract_reviewer_field routing "$payload")"
+  ADVISOR_REQUEST="$(extract_reviewer_object advisor_request "$payload")"
   if [ -z "$VERDICT" ] && [ -n "$payload" ]; then
     VERDICT="$payload"
   fi
@@ -134,6 +194,9 @@ parse_reviewer_payload() {
   fi
   if [ -z "$ROUTING" ]; then
     ROUTING="$(extract_reviewer_field routing "$text")"
+  fi
+  if [ -z "$ADVISOR_REQUEST" ] || [ "$ADVISOR_REQUEST" = "null" ]; then
+    ADVISOR_REQUEST="$(extract_reviewer_object advisor_request "$text")"
   fi
 }
 
@@ -148,17 +211,16 @@ review_payload_is_usable() {
   esac
 }
 
-run_claude_review() {
+run_claude_reviewer() {
+  local model="$1" effort="$2"
   local out reviewer_payload err_file
-  VERDICT=""
-  ROUTING=""
   command -v claude >/dev/null || {
-    echo "claude not on PATH; falling back to Codex reviewer" >&2
+    echo "claude not on PATH" >&2
     return 1
   }
   err_file="$(mktemp "${TMPDIR:-/tmp}/review-claude.XXXXXX")"
-  if ! out="$(printf '%s' "$prompt" | claude -p --model "$REVIEW_MODEL" --effort "$REVIEW_EFFORT" --output-format json 2>"$err_file")"; then
-    echo "Claude reviewer failed; falling back to Codex reviewer." >&2
+  if ! out="$(printf '%s' "$prompt" | claude -p --model "$model" --effort "$effort" --output-format json 2>"$err_file")"; then
+    echo "claude reviewer failed" >&2
     cat "$err_file" >&2 || true
     rm -f "$err_file"
     return 1
@@ -166,49 +228,91 @@ run_claude_review() {
   rm -f "$err_file"
   reviewer_payload="$(printf '%s' "$out" | jq -r '.verdict // .result // empty')"
   parse_reviewer_payload "$out" "$reviewer_payload"
-  if ! review_payload_is_usable; then
-    echo "Claude reviewer returned an unusable verdict/routing; falling back to Codex reviewer." >&2
-    VERDICT=""
-    ROUTING=""
-    return 1
-  fi
-  ACTIVE_REVIEWER="claude"
-  ACTIVE_MODEL="$REVIEW_MODEL/$REVIEW_EFFORT"
+  review_payload_is_usable
 }
 
-run_codex_review() {
+run_codex_reviewer() {
+  local model="$1" effort="$2"
   local result_file stdout_file reviewer_payload
-  VERDICT=""
-  ROUTING=""
-  command -v codex >/dev/null \
-    || { echo "codex not on PATH; cannot run fallback reviewer" >&2; exit 3; }
+  command -v codex >/dev/null || {
+    echo "codex not on PATH" >&2
+    return 1
+  }
   result_file="$(mktemp "${TMPDIR:-/tmp}/review-codex-result.XXXXXX")"
   stdout_file="$(mktemp "${TMPDIR:-/tmp}/review-codex-stdout.XXXXXX")"
   if ! printf '%s' "$prompt" | codex exec \
-    --model "$FALLBACK_MODEL" \
-    -c "model_reasoning_effort=\"$FALLBACK_EFFORT\"" \
+    --model "$model" \
+    -c "model_reasoning_effort=\"$effort\"" \
     --json \
     --output-last-message "$result_file" \
     - >"$stdout_file"; then
     cat "$stdout_file" >&2 || true
     rm -f "$result_file" "$stdout_file"
-    echo "fallback Codex reviewer failed" >&2
-    exit 3
+    echo "codex reviewer failed" >&2
+    return 1
   fi
   reviewer_payload="$(cat "$result_file")"
   parse_reviewer_payload "$reviewer_payload" "$reviewer_payload"
   rm -f "$result_file" "$stdout_file"
-  review_payload_is_usable || {
-    echo "fallback Codex reviewer returned an unusable verdict/routing" >&2
-    exit 3
-  }
-  ACTIVE_REVIEWER="codex"
-  ACTIVE_MODEL="$FALLBACK_MODEL/$FALLBACK_EFFORT"
+  review_payload_is_usable
+}
+
+# Generic dispatch: run whichever tool a model resolves to. Extend here if a
+# third CLI is ever added.
+run_reviewer_tool() {
+  local tool="$1" model="$2" effort="$3"
+  case "$tool" in
+    claude) run_claude_reviewer "$model" "$effort" ;;
+    codex) run_codex_reviewer "$model" "$effort" ;;
+    *) echo "unsupported reviewer tool: $tool" >&2; return 1 ;;
+  esac
+}
+
+run_reviewer_with_fallback() {
+  ADVISOR_REQUEST=""
+  if run_reviewer_tool "$REVIEW_TOOL" "$REVIEW_MODEL" "$REVIEW_EFFORT"; then
+    ACTIVE_REVIEWER="$REVIEW_TOOL"; ACTIVE_MODEL="$REVIEW_MODEL/$REVIEW_EFFORT"
+    return 0
+  fi
+  echo "primary reviewer ($REVIEW_TOOL) unusable; falling back to $FALLBACK_TOOL" >&2
+  if run_reviewer_tool "$FALLBACK_TOOL" "$FALLBACK_MODEL" "$FALLBACK_EFFORT"; then
+    ACTIVE_REVIEWER="$FALLBACK_TOOL"; ACTIVE_MODEL="$FALLBACK_MODEL/$FALLBACK_EFFORT"
+    return 0
+  fi
+  echo "fallback reviewer ($FALLBACK_TOOL) also unusable" >&2
+  return 1
+}
+
+consult_advisor_and_retry() {
+  local question context context_file answer
+  question="$(printf '%s' "$ADVISOR_REQUEST" | jq -r '.question // "reviewer needs help"' 2>/dev/null || echo "reviewer needs help")"
+  context="$(printf '%s' "$ADVISOR_REQUEST" | jq -r '.context // ""' 2>/dev/null || echo "")"
+  context_file="$(mktemp "${TMPDIR:-/tmp}/review-advisor-context.XXXXXX")"
+  printf '%s' "$context" >"$context_file"
+  echo "reviewer asked the advisor: $question" >&2
+  if ! answer="$("$HERE/advise" --question "$question" --context-file "$context_file" \
+      --model "$ADVISOR_MODEL" --effort "$ADVISOR_EFFORT" --tool "$ADVISOR_TOOL")"; then
+    rm -f "$context_file"
+    echo "advisor consult failed; proceeding with the reviewer's own answer" >&2
+    return 1
+  fi
+  rm -f "$context_file"
+  prompt="$base_prompt
+
+--- feedback: advisor consult ---
+You asked: $question
+Advisor answered: $answer
+Do not ask again this turn; give your final verdict now."
+  ADVISOR_CONSULTED=1
+  run_reviewer_tool "$ACTIVE_REVIEWER" "$REVIEW_MODEL" "$REVIEW_EFFORT"
 }
 
 # Run the reviewer unless a verdict was supplied for testing.
 if [ -z "$VERDICT" ]; then
-  run_claude_review || run_codex_review
+  run_reviewer_with_fallback
+  if [ -n "${ADVISOR_REQUEST:-}" ] && [ "$ADVISOR_REQUEST" != "null" ] && [ "$ADVISOR_CONSULTED" = 0 ]; then
+    consult_advisor_and_retry || true
+  fi
 fi
 
 case "$VERDICT" in

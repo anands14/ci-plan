@@ -21,24 +21,25 @@ The human is the only uncorrelated check in the system, and removing them is for
 ## 2. Roles
 
 - **Implementer** - writes code and the tests for it, from the task's acceptance criteria.
-- **Reviewer** - a *different model from the implementer*, the single gating automated reviewer.
+- **Reviewer** - the single gating automated reviewer.
   Reviews only already-green code.
-- **Advisory checker** - optional, free-tier, bounded checks.
-  Advisory only: never blocks the pipeline, never spends the implementer's fix budget.
-- **Spec author** - drafts task issues from a plan or PRD, but does not implement the same task.
-  The human or a separate review step applies `ready`.
+  May run the same model as the implementer - no invariant forbids it; the human owns decorrelation consciously at the daily-branch-to-main gate instead (see [PLAN.md](../PLAN.md) section 7).
+- **Advisor** - an on-demand, bounded consult, not a gate.
+  Invoked either proactively (the implementer or reviewer asks a focused question instead of guessing) or reactively (the orchestrator consults it once before marking a task `stuck`).
+  One round-trip; never a second implementer, never a second review pass.
 - **Integration agent** - serially merges approved PRs into `day/YYYY-MM-DD`, runs post-merge checks on the combined branch, reverts the just-merged PR if those checks fail, and notifies the owning agent with the failure cause.
   It never merges to `main`.
 
-The reviewer must be a different model family than the implementer.
-Same-model review is forbidden as the gate, because it shares the author's blind spots.
+Spec-authoring is not an automated pipeline role.
+It happens interactively, before an issue exists, using the global `grilling` and `to-tickets` skills; the human applies `ready` (directly, or by advancing the frontier - see section 3) to whatever `to-tickets` published.
 The implementer may not define or rewrite the acceptance criteria for the task it implements.
 
 ---
 
 ## 3. The per-task loop
 
-1. Claim a `ready` task, create a branch and a draft PR.
+1. Claim every currently-safe `ready` task, create a branch and a draft PR for each.
+   There is no fixed worker-count cap: concurrency is bounded only by the dependency frontier (a task whose declared `Blocked by #N` issues are still open is not `ready` yet, and is promoted the moment they close) and by file-scope collisions (an undeclared overlap is a slicing problem and routes to a human; a declared or in-flight overlap is serialized - one claimed now, the other held for the next round).
 2. Implement code plus tests derived from the acceptance criteria, in an isolated worktree.
    **For any user-facing change, run it on a real target (simulator/device) and write the E2E at the criterion's declared level** - widget tests alone do not count as "tested".
 3. **Cheap gate first:** lint, build, and tests (unit + widget).
@@ -47,8 +48,9 @@ The implementer may not define or rewrite the acceptance criteria for the task i
    The PR body **declares its test status** (ran-on-target? E2E written, or N/A + reason); a `test-discipline` check enforces the declaration and that user-facing changes ship an E2E.
 4. If red, the implementer iterates with the failure logs while it accepts the premise and makes material progress.
    Same failing test alone is not a stuck signal.
+   Genuinely stuck (not just red) gets one advisor consult before the task is marked `stuck` (section 6).
 5. If green, the reviewer reviews once, on the final candidate.
-   The advisory checker runs in parallel.
+   Either role may consult the advisor once, mid-turn, on a specific question instead of guessing.
 6. If changes are requested, the implementer addresses them while it accepts the objection and makes material progress.
    Same reviewer objection alone is not a stuck signal.
 7. If approved, the reviewer routes the PR as `clean` or `flagged`, and the PR enters the daily integration queue.
@@ -69,6 +71,7 @@ It may not proceed against an invariant on its own judgment.
 - Tests are derived from the acceptance criteria, not invented by the implementer to match its own code.
 - A `ready` task is a contract.
   It must have concrete acceptance criteria, test levels, a files/modules-in-scope manifest, out-of-scope notes, dependency/blocker notes, review-size estimate, and any protected-path or architecture risk called out.
+  A real blocker is a `#N` issue reference, not prose - that is what lets the orchestrator promote the task to `ready` on its own the moment `#N` closes, instead of a human re-checking and relabeling it.
 - No agent may weaken, skip, delete, or `@Ignore`/`skip`-annotate a test to make a check pass.
   A test believed wrong is an escalation, never a self-applied fix.
 - A **user-facing change is not done** until it has E2E coverage at its declared level and has been run on at least one credible real target (macOS app, iOS simulator, Android emulator, or real device), with the PR declaring this.
@@ -95,8 +98,8 @@ Convention *content* (naming, structure, patterns) lives in the project constitu
 
 - The window-share ceiling is a fairness pause, not a failure judgment.
   If progress is plausible but the task has consumed its configured share, label it `deferred`, keep the worktree lease, and resume later.
-- Mark a task `stuck` when the implementer disputes the reviewer or spec, says the spec is unclear or wrong, repeats a protected-path conflict, repeats an architecture invariant violation, makes no material diff between attempts, or lacks required external input.
-- On stuck, the task produces a diagnostic artifact for the human: the draft PR as-is, the failure logs, and the agent's own account of what it tried and its best guess at the blocker.
+- Mark a task `stuck` when the implementer disputes the reviewer or spec, says the spec is unclear or wrong, repeats a protected-path conflict, repeats an architecture invariant violation, makes no material diff between attempts, or lacks required external input - but first, exactly once, consult the advisor: if it unblocks the task, the implementer gets one retried turn with its answer as feedback before `stuck` is considered again; if the advisor's own answer is "this needs a human," or the retry also trips the same pattern, the task is genuinely stuck.
+- On stuck, the task produces a diagnostic artifact for the human: the draft PR as-is, the failure logs, the advisor consult if one happened, and the agent's own account of what it tried and its best guess at the blocker.
   It never stalls silently.
 - Stuck and deferred tasks are surfaced in the deterministic evening checklist as "needs attention" or "paused".
 

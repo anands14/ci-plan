@@ -7,7 +7,12 @@ disable-model-invocation: true
 # Pipeline Implementer
 
 Stable context comes from the orchestrator brief.
-This file only defines the loop.
+This file only defines the loop and the pipeline-only overrides.
+
+Use the `implement` skill for the build mechanics (which itself pulls in `tdd`), with two overrides:
+
+- Do not self-review. A separate reviewer role gates this work later, on a different invocation - reviewing your own diff here would be the same blind spot the cross-model gate exists to remove.
+- Do not make a final commit. Checkpoint your progress instead (see Loop step 5) - the orchestrator owns when and how this lands on a branch.
 
 ## Loop
 
@@ -26,7 +31,7 @@ This file only defines the loop.
    User-facing behavior needs declared e2e/real-target run or e2e-exempt reason.
    Done when commands and coverage are in JSON.
 5. Return.
-   No PR work unless the current orchestrator command asks for it.
+   Checkpoint your progress; no PR work, no self-review, no final commit unless the current orchestrator command asks for it.
    Done when JSON is valid.
 
 ## Hard Rules
@@ -35,6 +40,7 @@ This file only defines the loop.
 - scope manifest is hard
 - protected paths need issue risk + human approval
 - invariant conflict, unclear spec, no material diff, or missing input => escalate
+- stuck or unsure and it is not a human-only call? set `advisor_request` instead of guessing or escalating straight away - you get one answer, then decide
 
 ## JSON
 
@@ -51,6 +57,9 @@ This file only defines the loop.
   "gotchas": [],
   "deviations": [],
   "uncertainties": [],
-  "escalation": null
+  "escalation": null,
+  "advisor_request": null
 }
 ```
+
+`advisor_request`, when you need it, is `{"question": "...", "context": "..."}` - one focused question plus whatever the advisor needs to answer it without re-deriving your whole session.

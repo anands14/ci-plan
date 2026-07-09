@@ -6,6 +6,7 @@ import unittest
 from orchestrator.config import ProjectConfig
 from orchestrator.ledger import RunLedgerEntry, read_run_entry, write_run_entry
 from orchestrator.validation import (
+    _pool_lane_lock,
     parse_review_result,
     parse_sha,
     parse_sim_validation_status,
@@ -147,6 +148,58 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(updated.review_routing, "clean")
             self.assertEqual(fake_github.labels, [("owner/sample", 42, "clean", ["clean", "flagged"])])
             self.assertEqual(fake_github.states, [("owner/sample", 7, "approved", ["in-progress", "in-review"])])
+
+    def test_review_passes_generic_tool_and_advisor_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = config_for(root)
+            entry = entry_for(root)
+            write_run_entry(config, entry)
+            fake_github = FakeGitHub()
+            seen = {}
+
+            def fake_runner(command, **kwargs):
+                seen["command"] = command
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="review verdict: approve/clean -> success  (model claude-opus-4-8, sha "
+                    + "b" * 40
+                    + ")\n",
+                    stderr="",
+                )
+
+            run_review(config, entry, post=True, runner=fake_runner, github_client=fake_github)
+
+            command = seen["command"]
+            for flag in ("--tool", "--fallback-tool", "--advisor-model", "--advisor-effort", "--advisor-tool"):
+                self.assertIn(flag, command)
+            self.assertEqual(command[command.index("--tool") + 1], "claude")
+            self.assertEqual(command[command.index("--fallback-tool") + 1], "codex")
+
+
+class PoolLaneLockTests(unittest.TestCase):
+    def test_pool_of_one_reproduces_the_old_single_lane_behavior(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(Path(tmp))
+            with _pool_lane_lock(config, "sim-validation", 1):
+                with self.assertRaises(RuntimeError):
+                    with _pool_lane_lock(config, "sim-validation", 1):
+                        pass
+
+    def test_pool_of_two_allows_two_concurrent_slots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(Path(tmp))
+            slots = []
+            with _pool_lane_lock(config, "sim-validation", 2) as first:
+                slots.append(first)
+                with _pool_lane_lock(config, "sim-validation", 2) as second:
+                    slots.append(second)
+                    with self.assertRaises(RuntimeError):
+                        with _pool_lane_lock(config, "sim-validation", 2):
+                            pass
+
+            self.assertEqual(sorted(slots), [0, 1])
 
 
 if __name__ == "__main__":

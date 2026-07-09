@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from orchestrator.config import ConfigError, env_token_prefix, load_project_config
+from orchestrator.config import ConfigError, env_token_prefix, infer_tool, load_project_config
 
 
 PROJECT_YAML = """
@@ -77,6 +77,64 @@ agents:
 
     def test_env_token_prefix_is_uppercase_identifier(self):
         self.assertEqual(env_token_prefix("anands14/tovi.git"), "ANANDS14_TOVI_GIT")
+
+    def test_tool_is_inferred_from_model_name_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "projects").mkdir()
+            (root / "projects" / "sample.yaml").write_text(
+                PROJECT_YAML
+                + """
+agents:
+  implementer:
+    model: claude-sonnet-5
+  reviewer:
+    model: claude-fable-5
+    fallback_model: gpt-5.5
+  advisor:
+    model: gpt-5.5
+"""
+            )
+
+            config = load_project_config("sample", root=root)
+
+            self.assertEqual(config.implementer_tool, "claude")
+            self.assertEqual(config.reviewer_tool, "claude")
+            self.assertEqual(config.reviewer_fallback_tool, "codex")
+            self.assertEqual(config.advisor_tool, "codex")
+
+    def test_explicit_tool_override_wins_over_inference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "projects").mkdir()
+            (root / "projects" / "sample.yaml").write_text(
+                PROJECT_YAML
+                + """
+agents:
+  implementer:
+    model: some-future-model
+    tool: codex
+"""
+            )
+
+            config = load_project_config("sample", root=root)
+
+            self.assertEqual(config.implementer_tool, "codex")
+
+    def test_unmapped_model_without_override_raises(self):
+        with self.assertRaises(ConfigError):
+            infer_tool("some-unknown-model")
+
+    def test_advisor_defaults_to_reviewer_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "projects").mkdir()
+            (root / "projects" / "sample.yaml").write_text(PROJECT_YAML)
+
+            config = load_project_config("sample", root=root)
+
+            self.assertEqual(config.advisor_model, config.reviewer_model)
+            self.assertEqual(config.advisor_effort, "high")
 
 
 if __name__ == "__main__":

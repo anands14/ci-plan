@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# advise - the orchestrator's on-demand advisor consult. Not a gate: invoked
+# only when the implementer or reviewer self-requests help (an
+# `advisor_request` field in their structured output) or the deterministic
+# stuck-classifier is about to give up on a task. One bounded round-trip -
+# question in, answer out - never a second implementer, never a review.
+#
+# Usage: advise --question <text> [--context-file <path>] --model <model>
+#          [--effort <level>] [--tool codex|claude] [--dry-run]
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SKILL="$(cd "$HERE/.." && pwd)/skills/pipeline-advisor/SKILL.md"
+QUESTION="" CONTEXT_FILE="" MODEL="" EFFORT="high" TOOL="" DRY=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --question) QUESTION="$2"; shift 2 ;;
+    --context-file) CONTEXT_FILE="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
+    --effort) EFFORT="$2"; shift 2 ;;
+    --tool) TOOL="$2"; shift 2 ;;
+    --skill) SKILL="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+[ -n "$QUESTION" ] || { echo "usage: advise --question <text> --model <model> [...]" >&2; exit 2; }
+[ -n "$MODEL" ] || { echo "usage: advise --question <text> --model <model> [...]" >&2; exit 2; }
+
+# Same tool-inference rule as orchestrator/config.py:infer_tool - a role's CLI
+# comes from its model name unless --tool overrides it.
+infer_tool_from_model() {
+  local model_lower
+  model_lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$model_lower" in
+    claude-*|fable-*|mythos-*) echo "claude" ;;
+    gpt-*|o1*|o3*) echo "codex" ;;
+    gemini-*) echo "gemini" ;;
+    *) echo "cannot infer tool for model '$1'; pass --tool explicitly" >&2; exit 2 ;;
+  esac
+}
+[ -n "$TOOL" ] || TOOL="$(infer_tool_from_model "$MODEL")"
+
+context=""
+if [ -n "$CONTEXT_FILE" ]; then
+  [ -f "$CONTEXT_FILE" ] || { echo "context file not found: $CONTEXT_FILE" >&2; exit 2; }
+  context="$(cat "$CONTEXT_FILE")"
+fi
+
+prompt="$(cat "$SKILL" 2>/dev/null || echo '[pipeline-advisor role skill]')
+
+You are being consulted mid-task by another agent (implementer or reviewer)
+that hit something it could not resolve on its own. Answer the question
+directly and concisely - an unblock, a recommendation, or a clear statement
+that this needs a human. You are not implementing or reviewing; you are
+giving one focused answer.
+
+--- question ---
+$QUESTION
+
+--- context ---
+$context"
+
+if [ "$DRY" = 1 ]; then
+  echo "Would consult advisor via $TOOL model $MODEL/$EFFORT."
+  echo "Prompt assembled: ${#prompt} bytes (skill + question + context)."
+  exit 0
+fi
+
+case "$TOOL" in
+  claude)
+    command -v claude >/dev/null || { echo "claude not on PATH" >&2; exit 3; }
+    printf '%s' "$prompt" | claude -p --model "$MODEL" --effort "$EFFORT"
+    ;;
+  codex)
+    command -v codex >/dev/null || { echo "codex not on PATH" >&2; exit 3; }
+    result_file="$(mktemp "${TMPDIR:-/tmp}/advise-codex-result.XXXXXX")"
+    trap 'rm -f "$result_file"' EXIT
+    printf '%s' "$prompt" | codex exec \
+      --model "$MODEL" \
+      -c "model_reasoning_effort=\"$EFFORT\"" \
+      --json \
+      --output-last-message "$result_file" \
+      - >/dev/null
+    cat "$result_file"
+    ;;
+  *)
+    echo "unsupported advisor tool: $TOOL" >&2
+    exit 2
+    ;;
+esac

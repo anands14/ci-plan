@@ -4,7 +4,14 @@ import unittest
 
 from orchestrator.config import ProjectConfig
 from orchestrator.ledger import make_run_entry, write_run_entry
-from orchestrator.queueing import claim_next_ready, validate_ready_issue
+from orchestrator.queueing import (
+    advance_ready_frontier,
+    claim_all_ready,
+    claim_next_ready,
+    make_blocker_resolver,
+    parse_blocker_refs,
+    validate_ready_issue,
+)
 
 
 VALID_BODY = """
@@ -41,12 +48,22 @@ Deliver a small thing.
 
 
 class FakeGitHub:
-    def __init__(self, issues):
-        self.issues = issues
+    def __init__(self, issues=None, *, by_label=None, closed_numbers=None):
+        self.issues = issues or []
+        self.by_label = by_label or {}
+        self.closed_numbers = set(closed_numbers or [])
         self.states = []
 
     def ready_issues(self, repo):
         return self.issues
+
+    def issues_with_label(self, repo, label):
+        if label == "ready":
+            return self.issues
+        return self.by_label.get(label, [])
+
+    def issue_closed(self, repo, number):
+        return number in self.closed_numbers
 
     def set_state(self, repo, number, add, remove=None):
         self.states.append((repo, number, add, remove or []))
@@ -215,6 +232,128 @@ class ClaimNextTests(unittest.TestCase):
 
             self.assertTrue(path.is_file())
             self.assertIn("sample-issue-7.json", str(path))
+
+
+class BlockerParsingTests(unittest.TestCase):
+    def test_parse_blocker_refs_extracts_issue_numbers(self):
+        self.assertEqual(parse_blocker_refs("- #88, blocked on #91 too"), [88, 91])
+        self.assertEqual(parse_blocker_refs("None"), [])
+
+    def test_resolver_resolves_only_when_every_referenced_issue_is_closed(self):
+        github_client = FakeGitHub(closed_numbers=[88])
+        resolver = make_blocker_resolver(github_client, "owner/sample")
+
+        self.assertTrue(resolver("#88"))
+        self.assertFalse(resolver("#88, #91"))
+        self.assertFalse(resolver("waiting on design sign-off"))
+
+
+def blocked_body(blocker: str) -> str:
+    return VALID_BODY.replace("## Dependencies / blockers\n\n- None", f"## Dependencies / blockers\n\n- {blocker}")
+
+
+class AdvanceFrontierTests(unittest.TestCase):
+    def test_promotes_blocked_issue_once_every_referenced_blocker_is_closed(self):
+        github_client = FakeGitHub(
+            by_label={"blocked": [{"number": 5, "title": "waits on 88", "body": blocked_body("#88")}]},
+            closed_numbers=[88],
+        )
+
+        promoted = advance_ready_frontier(config_for(Path("/tmp")), github_client=github_client)
+
+        self.assertEqual(promoted, [5])
+        self.assertEqual(github_client.states, [("owner/sample", 5, "ready", ["blocked"])])
+
+    def test_leaves_issue_blocked_while_its_blocker_is_still_open(self):
+        github_client = FakeGitHub(
+            by_label={"blocked": [{"number": 5, "title": "waits on 88", "body": blocked_body("#88")}]},
+            closed_numbers=[],
+        )
+
+        promoted = advance_ready_frontier(config_for(Path("/tmp")), github_client=github_client)
+
+        self.assertEqual(promoted, [])
+        self.assertEqual(github_client.states, [])
+
+
+class ClaimAllReadyTests(unittest.TestCase):
+    def test_claims_every_disjoint_ready_candidate_no_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = config_for(root)
+            github_client = FakeGitHub(
+                [
+                    {"number": 1, "title": "one", "body": body_with_scope("lib/a.dart")},
+                    {"number": 2, "title": "two", "body": body_with_scope("lib/b.dart")},
+                    {"number": 3, "title": "three", "body": body_with_scope("lib/c.dart")},
+                ]
+            )
+
+            result = claim_all_ready(config, dry_run=True, github_client=github_client)
+
+            self.assertEqual({c.issue_number for c in result.claimed}, {1, 2, 3})
+            self.assertEqual(result.deferred, [])
+            self.assertEqual(result.rejected, [])
+
+    def test_defers_ready_candidate_whose_scope_overlaps_in_flight_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = config_for(root)
+            github_client = FakeGitHub(
+                [{"number": 2, "title": "two", "body": body_with_scope("lib/a.dart")}],
+                by_label={
+                    "in-progress": [
+                        {"number": 1, "title": "one", "body": body_with_scope("lib/a.dart")}
+                    ]
+                },
+            )
+
+            result = claim_all_ready(config, dry_run=True, github_client=github_client)
+
+            self.assertEqual(result.claimed, [])
+            self.assertEqual(result.deferred, [2])
+            self.assertEqual(result.rejected, [])
+
+    def test_serializes_declared_shared_file_overlap_within_one_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = config_for(root)
+            github_client = FakeGitHub(
+                [
+                    {
+                        "number": 1,
+                        "title": "one",
+                        "body": body_with_scope("lib/a.dart", "Shared-file risk with #2"),
+                    },
+                    {
+                        "number": 2,
+                        "title": "two",
+                        "body": body_with_scope("lib/a.dart", "Shared-file risk with #1"),
+                    },
+                ]
+            )
+
+            result = claim_all_ready(config, dry_run=True, github_client=github_client)
+
+            self.assertEqual([c.issue_number for c in result.claimed], [1])
+            self.assertEqual(result.deferred, [2])
+            self.assertEqual(result.rejected, [])
+
+    def test_still_rejects_undeclared_scope_overlap_to_needs_human(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = config_for(root)
+            github_client = FakeGitHub(
+                [
+                    {"number": 1, "title": "one", "body": body_with_scope("lib/a.dart")},
+                    {"number": 2, "title": "two", "body": body_with_scope("lib/a.dart")},
+                ]
+            )
+
+            result = claim_all_ready(config, dry_run=True, github_client=github_client)
+
+            self.assertEqual(result.claimed, [])
+            self.assertEqual(len(result.rejected), 2)
 
 
 if __name__ == "__main__":

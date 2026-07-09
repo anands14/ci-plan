@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import subprocess
@@ -32,6 +32,47 @@ class ImplementerRun:
     codex_session_id: str | None
     summary: str
     returncode: int
+
+
+@dataclass(frozen=True)
+class AdvisorRun:
+    command: list[str]
+    answer: str
+    returncode: int
+
+
+def run_advisor_once(
+    config: ProjectConfig,
+    *,
+    question: str,
+    context: str = "",
+    context_path: Path | None = None,
+    runner: Any = subprocess.run,
+) -> AdvisorRun:
+    """One bounded, on-demand advisor consult. Never a second implementer."""
+    command = [
+        str(config.root / "bin" / "advise"),
+        "--question",
+        question,
+        "--model",
+        config.advisor_model,
+        "--effort",
+        config.advisor_effort,
+        "--tool",
+        config.advisor_tool,
+    ]
+    if context:
+        path = context_path or _default_advisor_context_path(config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(context, encoding="utf-8")
+        command += ["--context-file", str(path)]
+
+    result = runner(command, capture_output=True, text=True)
+    return AdvisorRun(command=command, answer=(result.stdout or "").strip(), returncode=result.returncode)
+
+
+def _default_advisor_context_path(config: ProjectConfig) -> Path:
+    return config.root / ".orchestrator" / "prompts" / config.name / "advisor-context.md"
 
 
 @dataclass(frozen=True)
@@ -86,6 +127,59 @@ Issue #{issue["number"]}: {issue["title"]}
 """
 
 
+def build_implementer_command(
+    config: ProjectConfig, lease_path: Path, result_path: Path
+) -> list[str]:
+    """Generic dispatch: the CLI shape follows the role's tool, not a hardcoded one."""
+    tool = config.implementer_tool
+    if tool == "codex":
+        return [
+            "codex",
+            "exec",
+            "--model",
+            config.implementer_model,
+            "-c",
+            f'model_reasoning_effort="{config.implementer_effort}"',
+            "--cd",
+            str(lease_path),
+            "--json",
+            "--output-last-message",
+            str(result_path),
+            "-",
+        ]
+    if tool == "claude":
+        return [
+            "claude",
+            "-p",
+            "--model",
+            config.implementer_model,
+            "--effort",
+            config.implementer_effort,
+            "--output-format",
+            "json",
+        ]
+    raise RuntimeError(f"unsupported implementer tool: {tool}")
+
+
+def _implementer_runner_kwargs(config: ProjectConfig, lease_path: Path) -> dict[str, Any]:
+    """codex takes its cwd via --cd; claude needs the subprocess cwd set instead."""
+    if config.implementer_tool == "claude":
+        return {"cwd": str(lease_path)}
+    return {}
+
+
+def _extract_final_text(config: ProjectConfig, result: Any, result_path: Path) -> str:
+    """Normalize each tool's structured-output shape to a single JSON text blob."""
+    if config.implementer_tool == "claude":
+        payload = _maybe_json(result.stdout)
+        text = payload.get("result") if isinstance(payload, dict) else None
+        text = text if isinstance(text, str) else (result.stdout or "")
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(text, encoding="utf-8")
+        return text
+    return result_path.read_text(encoding="utf-8") if result_path.is_file() else ""
+
+
 def run_implementer_once(
     config: ProjectConfig,
     entry: RunLedgerEntry,
@@ -93,6 +187,7 @@ def run_implementer_once(
     dry_run: bool = False,
     github_client: Any = github,
     runner: Any = subprocess.run,
+    _advisor_consulted: bool = False,
 ) -> ImplementerRun:
     issue = github_client.issue(config.repo, entry.issue_number)
     prompt = build_implementer_prompt(
@@ -105,20 +200,7 @@ def run_implementer_once(
     result_path = _result_path(config, entry.issue_number)
     log_path = Path(entry.log_path)
     lease_path = Path(entry.lease_path)
-    command = [
-        "codex",
-        "exec",
-        "--model",
-        config.implementer_model,
-        "-c",
-        f'model_reasoning_effort="{config.implementer_effort}"',
-        "--cd",
-        str(lease_path),
-        "--json",
-        "--output-last-message",
-        str(result_path),
-        "-",
-    ]
+    command = build_implementer_command(config, lease_path, result_path)
 
     head_before = _git_head(lease_path)
     if dry_run:
@@ -130,7 +212,7 @@ def run_implementer_once(
             head_before=head_before,
             head_after=head_before,
             codex_session_id=None,
-            summary=f"would run codex with {len(prompt)} bytes of prompt",
+            summary=f"would run {config.implementer_tool} with {len(prompt)} bytes of prompt",
             returncode=0,
         )
 
@@ -145,6 +227,7 @@ def run_implementer_once(
         capture_output=True,
         text=True,
         env=build_worker_env(config.worker_home),
+        **_implementer_runner_kwargs(config, lease_path),
     )
     log_path.write_text(result.stdout, encoding="utf-8")
     if result.stderr:
@@ -154,12 +237,38 @@ def run_implementer_once(
 
     head_after = _git_head(lease_path)
     session_id = extract_session_id(result.stdout)
-    final_text = result_path.read_text(encoding="utf-8") if result_path.is_file() else ""
+    final_text = _extract_final_text(config, result, result_path)
     summary = compact_summary(final_text, result.stdout, result.returncode)
     returncode = result.returncode
+    parsed = _maybe_json(final_text)
+    advisor_request = parsed.get("advisor_request") if isinstance(parsed, dict) else None
+
+    if advisor_request and not _advisor_consulted:
+        return _consult_advisor_and_retry(
+            config,
+            entry,
+            issue=issue,
+            request=advisor_request,
+            fallback_summary=summary,
+            dry_run=dry_run,
+            github_client=github_client,
+            runner=runner,
+        )
+
     current_step = "implementer-ran" if result.returncode == 0 else "implementer-failed"
     if result.returncode != 0:
         classification = classify_summary(config, summary)
+        if classification.state == "stuck" and not _advisor_consulted:
+            return _consult_advisor_and_retry(
+                config,
+                entry,
+                issue=issue,
+                request={"question": _stuck_question(entry), "context": summary},
+                fallback_summary=summary,
+                dry_run=dry_run,
+                github_client=github_client,
+                runner=runner,
+            )
         if classification.state in {"stuck", "deferred"}:
             current_step = classification.state
             github_client.set_state(
@@ -209,6 +318,56 @@ def run_implementer_once(
         summary=summary,
         returncode=returncode,
     )
+
+
+def _consult_advisor_and_retry(
+    config: ProjectConfig,
+    entry: RunLedgerEntry,
+    *,
+    issue: dict[str, Any],
+    request: dict[str, Any],
+    fallback_summary: str,
+    dry_run: bool,
+    github_client: Any,
+    runner: Any,
+) -> ImplementerRun:
+    """One bounded advisor round-trip, then exactly one retried implementer turn."""
+    question = str(request.get("question") or fallback_summary)
+    context = str(request.get("context") or "")
+    advisor = run_advisor_once(config, question=question, context=context, runner=runner)
+    entry_with_advice = replace(
+        entry,
+        current_step="advisor-consulted",
+        advisor_question=question,
+        advisor_summary=advisor.answer[:2000],
+    )
+    update_run_entry(
+        config,
+        entry,
+        current_step="advisor-consulted",
+        advisor_question=question,
+        advisor_summary=advisor.answer[:2000],
+        last_summary=f"advisor consulted: {_one_line(advisor.answer)[:300]}",
+    )
+    return run_implementer_once(
+        config,
+        entry_with_advice,
+        dry_run=dry_run,
+        github_client=github_client,
+        runner=runner,
+        _advisor_consulted=True,
+    )
+
+
+def _stuck_question(entry: RunLedgerEntry) -> str:
+    return (
+        f"Issue #{entry.issue_number} ({entry.issue_title}) looks stuck. "
+        "What should the implementer try next, or should this go to the human?"
+    )
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
 
 
 def checkpoint_entry(config: ProjectConfig, entry: RunLedgerEntry) -> CheckpointResult:
@@ -297,6 +456,12 @@ def compact_summary(final_text: str, jsonl: str, returncode: int) -> str:
 
 
 def build_feedback_context(config: ProjectConfig, entry: RunLedgerEntry) -> str | None:
+    if entry.current_step == "advisor-consulted":
+        return _join_feedback(
+            "You asked the advisor a question; here is its answer. Do not ask again this turn.",
+            f"Q: {entry.advisor_question}" if entry.advisor_question else None,
+            f"A: {entry.advisor_summary}" if entry.advisor_summary else None,
+        )
     if entry.current_step == "gate-failed":
         return _join_feedback(
             "The previous deterministic gate failed.",

@@ -13,23 +13,25 @@ project:
 # The framework loads it as standing context alongside the agnostic CONSTITUTION.md.
 constitution: docs/CONSTITUTION.md
 
-# Which agents play which role for this project, and how they are invoked.
-# The reviewer MUST be a different model family than the implementer (see CONSTITUTION.md section 2).
+# Which model plays each role. No role is hardcoded to a specific CLI: the
+# tool is inferred from the model name (claude-*/fable-*/mythos-* -> claude,
+# gpt-*/o1*/o3* -> codex, gemini-* -> gemini) unless `tool:` overrides it below.
+# Implementer and reviewer may be the same model - no invariant forbids it;
+# you own the decorrelation call consciously at the daily-branch-to-main gate
+# instead (see CONSTITUTION.md section 2).
 agents:
   implementer:
-    tool: codex                      # invoked as `codex exec`
     model: gpt-5.5                   # default unless the human explicitly overrides
     effort: high
+    # tool: codex                    # only needed to override inference
   reviewer:
-    tool: claude                     # invoked locally as `claude -p` so it draws from the subscription window
-    model: claude-opus-4-8           # Opus 4.8
+    model: claude-opus-4-8           # Opus 4.8; runs locally so it draws from the subscription window
     effort: max                      # Max effort for the gating review
-    fallback_tool: codex             # used only when Claude cannot run or cannot return a verdict
-    fallback_model: gpt-5.5
+    fallback_model: gpt-5.5          # used only when the primary reviewer cannot run or cannot return a verdict
     fallback_effort: xhigh
-  advisory:                          # optional; remove the block to disable
-    tool: gemini
-    checks: [criteria-conformance, test-honesty]   # bounded, advisory-only
+  advisor:                           # on-demand consult, not a gate; defaults to the reviewer's model if omitted
+    model: claude-opus-4-8
+    effort: high
 
 worker_environment:
   home: ~/.agent-home/my-app-worker   # dedicated HOME for worker processes
@@ -41,14 +43,14 @@ worker_environment:
 
 # Budget, loop controls, and concurrency for this project.
 budget:
-  windows:                           # the framework treats each agent's subscription window as a separate tap
-    implementer_window_minutes: 300  # informational; the real reset is rolling and detected at runtime
-    reviewer_window_minutes: 300
+  windows:                           # one tap per resolved TOOL, not per role - roles sharing a tool share its window
+    claude_window_minutes: 300       # informational; the real reset is rolling and detected at runtime
+    codex_window_minutes: 300
   concurrency:
-    implementers_start: 2            # start conservative; raise toward 4-5 after measuring
-    implementers_max: 5
     reviewers: 1
-    sim_validations: 1               # serialize first to avoid simulator contention
+    sim_validations: 1               # simulator/device pool size; 1 reproduces the old serialized behavior
+    # There is no implementers_max: claiming is unbounded, bounded only by the
+    # dependency frontier and file-scope collisions (queueing.claim_all_ready).
   loop:
     per_task_window_share: 0.30      # fairness pause; label deferred, not stuck, when progress is plausible
     stuck_on:

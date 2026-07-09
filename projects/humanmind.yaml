@@ -17,19 +17,16 @@ constitution: docs/CONSTITUTION.md
 
 agents:
   implementer:
-    tool: codex
-    model: gpt-5.5
+    model: gpt-5.5                    # tool inferred: codex
     effort: high
   reviewer:
-    tool: claude
-    model: claude-opus-4-8
+    model: claude-opus-4-8            # tool inferred: claude
     effort: max
-    fallback_tool: codex
-    fallback_model: gpt-5.5
+    fallback_model: gpt-5.5           # tool inferred: codex
     fallback_effort: xhigh
-  advisory:
-    tool: gemini
-    checks: [criteria-conformance, test-honesty]
+  advisor:
+    model: claude-opus-4-8            # on-demand consult, not a gate
+    effort: high
 
 worker_environment:
   home: ~/.agent-home/tovi-worker
@@ -41,10 +38,10 @@ worker_environment:
 
 budget:
   concurrency:
-    implementers_start: 2
-    implementers_max: 5
     reviewers: 1
     sim_validations: 1
+    # No implementers_max - claiming is unbounded, bounded only by the
+    # dependency frontier and file-scope collisions.
   loop:
     per_task_window_share: 0.30       # fairness pause -> deferred, not stuck, while progress is plausible
     stuck_on:

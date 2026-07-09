@@ -4,9 +4,11 @@ import tempfile
 import unittest
 
 from orchestrator.agents import (
+    build_implementer_command,
     build_implementer_prompt,
     build_feedback_context,
     extract_session_id,
+    run_advisor_once,
     run_implementer_once,
 )
 from orchestrator.context import handoff_log_relative_path
@@ -311,7 +313,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("Checkpoint commit", updated.last_summary)
             self.assertNotEqual(updated.head_before, updated.head_after)
 
-    def test_failed_run_marks_true_stuck(self):
+    def test_failed_run_consults_advisor_once_then_marks_true_stuck(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             seed_framework(root)
@@ -321,8 +323,12 @@ class AgentTests(unittest.TestCase):
             entry = entry_for(root)
             write_run_entry(config, entry)
             fake_github = FakeGitHub()
+            advisor_calls = []
 
-            def fake_runner(command, input, capture_output, text, env):
+            def fake_runner(command, *args, **kwargs):
+                if command[0].endswith("bin/advise"):
+                    advisor_calls.append(command)
+                    return subprocess.CompletedProcess(command, 0, stdout="Escalate to the human.", stderr="")
                 result_index = command.index("--output-last-message") + 1
                 Path(command[result_index]).parent.mkdir(parents=True, exist_ok=True)
                 Path(command[result_index]).write_text(
@@ -339,8 +345,10 @@ class AgentTests(unittest.TestCase):
             )
 
             updated = read_run_entry(config, 7)
+            self.assertEqual(len(advisor_calls), 1)
             self.assertEqual(result.returncode, 1)
             self.assertEqual(updated.current_step, "stuck")
+            self.assertEqual(updated.advisor_summary, "Escalate to the human.")
             self.assertEqual(fake_github.states, [("owner/sample", 7, "stuck", ["in-progress", "in-review"])])
 
     def test_failed_run_marks_deferred_for_window_ceiling(self):
@@ -373,6 +381,100 @@ class AgentTests(unittest.TestCase):
             updated = read_run_entry(config, 7)
             self.assertEqual(updated.current_step, "deferred")
             self.assertEqual(fake_github.states, [("owner/sample", 7, "deferred", ["in-progress", "in-review"])])
+
+    def test_implementer_command_dispatches_generically_by_tool(self):
+        root = Path.cwd()
+        codex_config = config_for(root)
+        claude_config = ProjectConfig(
+            name="sample",
+            repo="owner/sample",
+            default_branch="main",
+            local_path=root / "target",
+            agent_remote="agent",
+            worker_home=root / "home",
+            raw={"agents": {"implementer": {"model": "claude-sonnet-5"}}},
+            path=root / "projects" / "sample.yaml",
+            root=root,
+        )
+
+        codex_command = build_implementer_command(codex_config, root / "lease", root / "result.json")
+        claude_command = build_implementer_command(claude_config, root / "lease", root / "result.json")
+
+        self.assertEqual(codex_command[0], "codex")
+        self.assertIn("--cd", codex_command)
+        self.assertEqual(claude_command[0], "claude")
+        self.assertIn("--model", claude_command)
+        self.assertEqual(claude_command[claude_command.index("--model") + 1], "claude-sonnet-5")
+        self.assertNotIn("--cd", claude_command)
+
+    def test_proactive_advisor_request_consults_once_then_retries_implementer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed_framework(root)
+            lease = root / "lease"
+            lease.mkdir()
+            config = config_for(root)
+            entry = entry_for(root)
+            write_run_entry(config, entry)
+            fake_github = FakeGitHub()
+            calls = {"implementer": 0, "advisor": 0}
+
+            def fake_runner(command, *args, **kwargs):
+                if command[0].endswith("bin/advise"):
+                    calls["advisor"] += 1
+                    self.assertIn("--question", command)
+                    self.assertEqual(command[command.index("--question") + 1], "which store wins?")
+                    return subprocess.CompletedProcess(command, 0, stdout="Use the file store.", stderr="")
+                calls["implementer"] += 1
+                result_index = command.index("--output-last-message") + 1
+                if calls["implementer"] == 1:
+                    payload = (
+                        '{"success": false, "summary": "need input",'
+                        ' "advisor_request": {"question": "which store wins?", "context": "two stores disagree"}}'
+                    )
+                else:
+                    payload = '{"success": true, "summary": "used the file store as advised"}'
+                Path(command[result_index]).parent.mkdir(parents=True, exist_ok=True)
+                Path(command[result_index]).write_text(payload, encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            result = run_implementer_once(
+                config,
+                entry,
+                github_client=fake_github,
+                runner=fake_runner,
+            )
+
+            updated = read_run_entry(config, 7)
+            self.assertEqual(calls["advisor"], 1)
+            self.assertEqual(calls["implementer"], 2)
+            self.assertEqual(result.summary, "used the file store as advised")
+            self.assertEqual(updated.last_summary, "used the file store as advised")
+            self.assertEqual(fake_github.states, [])
+
+    def test_run_advisor_once_writes_context_file_and_returns_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = config_for(root)
+            seen = {}
+
+            def fake_runner(command, **kwargs):
+                seen["command"] = command
+                return subprocess.CompletedProcess(command, 0, stdout="do the simple thing\n", stderr="")
+
+            result = run_advisor_once(
+                config,
+                question="which approach?",
+                context="option A vs option B",
+                context_path=root / "context.md",
+                runner=fake_runner,
+            )
+
+            self.assertEqual(result.answer, "do the simple thing")
+            self.assertTrue((root / "context.md").is_file())
+            self.assertEqual((root / "context.md").read_text(), "option A vs option B")
+            self.assertIn("--question", seen["command"])
+            self.assertIn("--context-file", seen["command"])
 
 
 if __name__ == "__main__":

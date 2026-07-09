@@ -27,18 +27,28 @@ def _gh(args: list[str], repo: str) -> str:
     return r.stdout
 
 
+def issues_with_label(repo: str, label: str, *, limit: int = 50) -> list[dict]:
+    """Open issues carrying a given lifecycle label."""
+    out = _gh(
+        ["issue", "list", "--label", label, "--state", "open",
+         "--json", "number,title,body,labels", "--limit", str(limit)],
+        repo,
+    )
+    return json.loads(out)
+
+
 def ready_issues(repo: str) -> list[dict]:
     """Open issues labelled `ready` (eligible to claim).
 
     Small-wins ordering is applied by the scheduler; here we just return the
     queue.
     """
-    out = _gh(
-        ["issue", "list", "--label", "ready", "--state", "open",
-         "--json", "number,title,body,labels", "--limit", "50"],
-        repo,
-    )
-    return json.loads(out)
+    return issues_with_label(repo, "ready")
+
+
+def issue_closed(repo: str, number: int) -> bool:
+    out = _gh(["issue", "view", str(number), "--json", "state"], repo)
+    return str(json.loads(out).get("state", "")).upper() == "CLOSED"
 
 
 def issue_labels(repo: str, number: int) -> list[str]:

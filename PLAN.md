@@ -1,7 +1,7 @@
 # Agent-Driven Development Pipeline - Plan
 
-Status: designed 2026-06-27, re-evaluated 2026-06-30, not yet built.
-This document is standing context for every agent working in this repo (Codex, Claude, Gemini).
+Status: designed 2026-06-27, re-evaluated 2026-06-30, re-evaluated again 2026-07-09 (model-agnostic roles, an advisor role, unbounded frontier-based concurrency - see [DECISIONS.md](DECISIONS.md) D8).
+This document is standing context for every agent working in this repo, regardless of which model or CLI it runs as (Codex, Claude, or another tool - see section 2).
 Read it before acting.
 
 The application itself (platforms, features, launch order) is a separate "app plan" track.
@@ -29,17 +29,19 @@ The private repo can stay private: agents run on the Mac, write only to an agent
   Owns the final `main` merge decision, the evening spec session, and the weekly retro.
   Nothing reaches `main` without explicit human approval.
   Clean entries in the daily PR are glance-review candidates; flagged entries require real attention.
-- **Codex** (implementer) - writes code and tests from acceptance criteria.
-  Subscription-windowed, flat-rate; runs via `codex exec --model gpt-5.5 -c model_reasoning_effort="high"` by default.
-- **Claude** (gating reviewer) - the single authoritative automated reviewer.
-  Runs *locally* on the Mac via `claude -p --model claude-opus-4-8 --effort max` so it draws from the 5-hour subscription window, not metered API.
-  `CLAUDE_REVIEW_MODEL` may override the exact model, but Opus 4.8 Max is the default gate.
-  If Claude cannot run or cannot return a verdict, the wrapper falls back to Codex GPT-5.5 xhigh.
+- **Implementer** - writes code and tests from acceptance criteria.
+  Runs locally on the Mac, subscription-windowed, flat-rate.
+  No role is hardcoded to a specific model or CLI: `orchestrator/config.py:infer_tool` resolves which tool (`codex exec`, `claude -p`, ...) runs a role from whichever model that role is configured with, so "which model implements and which reviews" is a config choice, not an architecture decision.
+- **Reviewer** - the single authoritative automated reviewer.
+  Runs locally so it draws from a subscription window, not metered API.
+  Falls back to a configured fallback model/tool if the primary cannot run or cannot return a verdict.
   Only ever reviews already-green code.
-- **Gemini** (advisory checker) - free credits.
-  Bounded, advisory-only checks (acceptance-criteria conformance, test-honesty).
-  Never gates, never stalls the pipeline.
-- **GitHub** - the spine: issues = task queue, PRs = work unit and Codex/Claude handoff medium, Actions = non-LLM CI, labels = lifecycle state, and optional self-hosted runner events = wakeups.
+  May be the same model as the implementer - see section 7 for why that's fine here.
+- **Advisor** - an on-demand, bounded consult, not a standing gate.
+  Invoked proactively (implementer/reviewer asks a focused question via `advisor_request` instead of guessing) or reactively (the orchestrator consults it once before marking a task `stuck`).
+  One round-trip per invocation; never a second implementer, never a second review pass.
+  Folds in what used to be a separate, narrower "advisory checker" role.
+- **GitHub** - the spine: issues = task queue, PRs = work unit and implementer/reviewer handoff medium, Actions = non-LLM CI, labels = lifecycle state, and optional self-hosted runner events = wakeups.
   On private Free repos, branch protection is not the gate.
 - **Mac orchestrator** - the brain: a thin, deterministic, persistent `launchd` daemon.
   It keeps workers full, owns claiming and leases, and uses GitHub labels plus a local run ledger to resume safely.
@@ -61,18 +63,20 @@ The private repo can stay private: agents run on the Mac, write only to an agent
 
 ## 4. The per-task loop
 
-1. Claim a `ready` issue, create a branch and a draft PR.
-2. Codex implements code plus tests derived from the acceptance criteria.
+1. Claim every currently-safe `ready` issue, create a branch and a draft PR for each.
+   No fixed worker-count cap: the dependency frontier (`Blocked by #N` edges, auto-advanced as they close) and file-scope collisions (undeclared overlap -> a human; declared/in-flight overlap -> serialize) are what bound concurrency, not a policy number.
+2. The implementer implements code plus tests derived from the acceptance criteria.
 3. **Cheap gate first:** lint, build, unit/widget/smoke tests on Linux CI.
    Deterministic and fast.
    Never spend review tokens on code that does not compile or fails its own tests.
 4. Red? The same implementer iterates with the failure logs while it is accepting the premise and making material progress.
    Same failing test alone is not stuck.
-5. Green? **Now** Claude reviews (gating) and Gemini runs its advisory checks.
+   If it looks truly stuck, one advisor consult happens first (section 2) before the task is marked `stuck`.
+5. Green? **Now** the reviewer reviews (gating); either implementer or reviewer may consult the advisor once, mid-turn, on a specific question.
    Review runs once, on the final green candidate.
-6. Changes requested? Codex addresses them while it accepts the objection and keeps making material progress.
+6. Changes requested? The implementer addresses them while it accepts the objection and keeps making material progress.
    Same reviewer objection alone is not stuck.
-7. A task becomes `stuck` only when the implementer disputes the reviewer/spec, says the spec is unclear or wrong, repeats a protected-path conflict, repeats an architecture invariant violation, makes no material diff, or lacks required external input.
+7. A task becomes `stuck` only when the implementer disputes the reviewer/spec, says the spec is unclear or wrong, repeats a protected-path conflict, repeats an architecture invariant violation, makes no material diff, or lacks required external input - and the one-time advisor consult didn't unblock it.
 8. A task becomes `deferred` when the window-share ceiling is reached while progress is still plausible.
    The worktree lease and local run state are preserved for later resume.
 9. Approved? The reviewer classifies the PR as `clean` or `flagged`.
@@ -101,7 +105,7 @@ The private repo can stay private: agents run on the Mac, write only to an agent
   Silent deviation is the one forbidden thing.
   Agents never self-amend the constitution.
 - **Protected paths.** Agents can propose but never edit the CI config, the merge gate, or the constitution.
-- **Strict `ready` contract.** Only human-approved or separately reviewed spec-author output gets the `ready` label.
+- **Strict `ready` contract.** Only issues authored via the interactive `grilling` + `to-tickets` flow and approved by a human get the `ready` label - directly, or by the orchestrator auto-promoting a `blocked` issue once every `#N` it declares has closed.
   Missing criteria, missing test levels, missing scope, unresolved blockers, or undeclared protected-path risk removes `ready`.
 - **Agent-owned remote.** Before unattended mode, workers may not push directly to origin.
   They write only to an agent-owned fork or remote and open PRs into origin.
@@ -140,22 +144,27 @@ Three layers per agent, kept minimal on purpose - every token of bloat is window
 The scope manifest does triple duty: it saves window credits, keeps review diff-centric, and acts as a PR-size guard (a task whose manifest sprawls is too big and gets split).
 The deepest context lever is architectural: **deep modules with narrow interfaces** mean a task loads one module, not the whole repo.
 
+Same-model implementer and reviewer is allowed (section 2).
+That is a model-assignment choice, not a context-discipline one - it changes nothing about what gets injected vs. retrieved.
+
 ---
 
-## 8. Budget - the two-window scheduler
+## 8. Budget - windows keyed by tool, not by role
 
-The budget is not dollars; it is **two independent 5-hour subscription windows** (Codex and Claude), refilling on a rolling basis, plus free Gemini credits.
+The budget is not dollars; it is **independent subscription windows, one per resolved tool**, refilling on a rolling basis.
 The persistent daemon itself spends zero LLM tokens.
-Tokens are spent only when it invokes Codex, Claude, Gemini, or another model for a concrete task step.
+Tokens are spent only when it invokes a role's configured model for a concrete task step.
 
-- The scheduler treats the two windows as separate taps on a two-stage pipeline.
-  If Codex's window is dry, implementation stalls but Claude can still review green PRs; if Claude's is dry, reviews stall but Codex keeps implementing.
-  Each stage resumes when its own window refills.
+- Windows are tracked **per tool**, not per role, because a role's tool is a config choice: point implementer and reviewer at the same model and they share - and contend for - one window; point them at different models and each gets its own tap.
+  This is why the budget model cannot hardcode "two windows" - it has to key off whatever tools are actually configured for a given project, which could be one, two, or three (implementer, reviewer, advisor).
+- If a tool's window is dry, every role configured to that tool stalls together; roles on a different tool keep going.
+  Each stalled role resumes when its tool's window refills.
+- **Contention policy when a shared window is scarce:** finish in-flight work before starting new work on that tool - don't strand a task that's mid-review by starting a fresh implementation on the same tap.
 - **Small-wins-first:** bank quick, sure tasks early so a window that dies early still yields mergeable PRs.
 - **Cross-window resume is cheap** because lifecycle state lives in GitHub labels, local operational state lives in the run ledger, and the in-flight worktree is held by a durable lease that survives with zero processes (see treehouse below).
 - **Bounded prompts over persistent state.** Worktree, branch, issue, PR, logs, and run state persist.
-  Codex conversations do not need to persist forever.
-  Most retries should be fresh bounded invocations over the same worktree with the task spec, current diff, and latest failure/review output.
+  Agent conversations do not need to persist forever.
+  Most retries should be fresh bounded invocations over the same worktree with the task spec, current diff, and latest failure/review output - the same shape the one-time advisor consult uses (question and context in, one answer out, no persistent conversation).
 
 ---
 
@@ -213,7 +222,7 @@ The autonomous loop cannot build itself, so Phase 0 is supervised and hands-on.
 - **Isolation:** `treehouse`.
 - **Local gate:** `no-mistakes`.
 - **Spine:** GitHub (issues, PRs, labels, Actions CI, optional self-hosted wakeups).
-- **Agents:** Codex (`codex exec --model gpt-5.5 -c model_reasoning_effort="high"`), Claude (`claude -p --model claude-opus-4-8 --effort max`), Gemini.
+- **Agents:** implementer, reviewer, advisor - each `{model, effort}` in `projects/<name>.yaml`, tool inferred from the model (`orchestrator/config.py:infer_tool`) unless overridden. Today's default project config points these at Codex GPT-5.5 and Claude Opus 4.8; that is a config choice, not an architecture one.
 - **Wakeups:** GitHub issue events via a self-hosted runner or equivalent lightweight wake path, plus periodic reconciliation polling.
 - **No tmux, no heavyweight framework, no Sandcastle adoption as the primary runner.**
 
@@ -272,11 +281,11 @@ Its templates lean toward broad agent-managed branch merging and same-family rev
 
 ### Build ourselves (the irreducible delta nothing provides)
 
-- The **two-window scheduler** (Codex and Claude windows, cross-window resume, worker-slot fairness).
-- The **cross-model implement -> review gate** (Codex implements a PR, Claude reviews that same work - different models, for decorrelation).
+- The **per-tool window scheduler** (cross-window resume, worker-slot fairness, no fixed cap on how many tasks run at once).
+- The **implement -> review gate**, model-agnostic: same model is allowed for both roles now (the human owns decorrelation consciously at the daily-branch-to-main gate instead - section 7 of PLAN.md, section 2 of CONSTITUTION.md).
 - **GitHub issues-as-queue** plus the label state machine, strict `ready` preflight, event wakeups, and small-wins ordering.
 - The **daily integration lane**: one approved PR at a time into `day/YYYY-MM-DD`, post-merge checks on the combined branch, automatic revert on failure, and a final daily PR to `main`.
-- The **advisory-Gemini** checks and the **flake firewall**.
+- The **on-demand advisor** (proactive `advisor_request` plus the reactive stuck-backstop) and the **flake firewall**.
 - The **token-free evening checklist** and the weekly-retro metrics.
 
-All of it sits on top of `treehouse` (isolation) plus `no-mistakes` (gate) plus GitHub (spine), driven by Codex GPT-5.5 high and Claude Opus 4.8 Max on local subscription windows.
+All of it sits on top of `treehouse` (isolation) plus `no-mistakes` (gate) plus GitHub (spine), driven by whichever models the project config assigns to implementer/reviewer/advisor on local subscription windows.

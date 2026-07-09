@@ -11,6 +11,7 @@ import subprocess
 from typing import Any, Iterator
 
 from . import github
+from .concurrency import read_concurrency_policy
 from .config import ProjectConfig
 from .ledger import RunLedgerEntry, update_run_entry
 
@@ -57,7 +58,8 @@ def run_sim_validation(
         command.append("--post")
 
     log_path = _lane_log_path(config, entry, "sim-validation")
-    with _single_lane_lock(config, "sim-validation"):
+    pool_size = max(read_concurrency_policy(config).sim_validations, 1)
+    with _pool_lane_lock(config, "sim-validation", pool_size):
         result = runner(
             command,
             cwd=config.root,
@@ -122,10 +124,20 @@ def run_review(
         model or config.reviewer_model,
         "--effort",
         config.reviewer_effort,
+        "--tool",
+        config.reviewer_tool,
         "--fallback-model",
         config.reviewer_fallback_model,
         "--fallback-effort",
         config.reviewer_fallback_effort,
+        "--fallback-tool",
+        config.reviewer_fallback_tool,
+        "--advisor-model",
+        config.advisor_model,
+        "--advisor-effort",
+        config.advisor_effort,
+        "--advisor-tool",
+        config.advisor_tool,
     ]
     if post:
         command.append("--post")
@@ -190,23 +202,32 @@ def parse_sha(text: str) -> str | None:
 
 
 @contextmanager
-def _single_lane_lock(config: ProjectConfig, lane: str) -> Iterator[None]:
+def _pool_lane_lock(config: ProjectConfig, lane: str, pool_size: int) -> Iterator[int]:
+    """Acquire one free slot out of a pool of `pool_size` (simulators/devices).
+
+    Generalizes the old single-lane lock: `pool_size=1` reproduces the
+    original serialized behavior exactly; a larger pool lets that many
+    sim-validation runs proceed at once instead of queueing behind one lock.
+    """
     lock_dir = config.root / ".orchestrator" / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"{lane}.lock"
-    try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise RuntimeError(f"{lane} lane is already running: {lock_path}") from exc
-    try:
-        os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
-        yield
-    finally:
-        os.close(fd)
+    for slot in range(max(pool_size, 1)):
+        lock_path = lock_dir / f"{lane}-{slot}.lock"
         try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+            yield slot
+            return
+        finally:
+            os.close(fd)
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+    raise RuntimeError(f"{lane} lane pool exhausted ({pool_size} slot(s) all busy)")
 
 
 def _lane_log_path(config: ProjectConfig, entry: RunLedgerEntry, lane: str) -> Path:

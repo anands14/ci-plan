@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
 from . import github
 from .config import ProjectConfig
@@ -68,7 +68,30 @@ class ClaimResult:
     rejected: list[tuple[int, str, list[str]]]
 
 
-def validate_ready_issue(issue: dict[str, Any]) -> ReadyValidation:
+@dataclass(frozen=True)
+class BatchClaimResult:
+    """Every issue claimed this round, plus what was deferred, why, and any rejections."""
+
+    claimed: list[ClaimResult]
+    deferred: list[int]
+    actions: list[str]
+    rejected: list[tuple[int, str, list[str]]]
+
+
+BlockerResolver = Callable[[str], bool]
+
+
+def validate_ready_issue(
+    issue: dict[str, Any], *, blocker_resolver: BlockerResolver | None = None
+) -> ReadyValidation:
+    """Check a `ready`-contract candidate.
+
+    `blocker_resolver`, when given, lets a numbered blocker (`#123`) count as
+    resolved once its referenced issue is closed - this is what lets
+    `advance_ready_frontier` promote a `blocked` issue without requiring the
+    body to literally say `None`. Omit it (the default) to keep the strict
+    behavior used when validating an issue already claiming to be `ready`.
+    """
     body = str(issue.get("body") or "")
     sections = parse_sections(body)
     reasons: list[str] = []
@@ -99,7 +122,7 @@ def validate_ready_issue(issue: dict[str, Any]) -> ReadyValidation:
             reasons.append("size estimate must include priority")
 
     dependencies = sections.get("dependencies / blockers", "")
-    has_blockers = _has_non_none_items(dependencies)
+    has_blockers = _has_non_none_items(dependencies, blocker_resolver)
     if has_blockers:
         reasons.append("dependencies or blockers are not clear")
     risk_flags = sections.get("risk flags", "")
@@ -113,6 +136,11 @@ def validate_ready_issue(issue: dict[str, Any]) -> ReadyValidation:
         route_label="blocked" if has_blockers else "needs-human",
         reasons=reasons,
     )
+
+
+def parse_blocker_refs(text: str) -> list[int]:
+    """Issue numbers a blocker item references, e.g. `#88` -> `[88]`."""
+    return [int(match) for match in re.findall(r"#(\d+)", text)]
 
 
 def claim_next_ready(
@@ -185,6 +213,144 @@ def claim_next_ready(
         raise
 
 
+def make_blocker_resolver(github_client: Any, repo: str) -> BlockerResolver:
+    """A resolver backed by real GitHub issue state, one lookup per referenced number."""
+    closed_cache: dict[int, bool] = {}
+
+    def resolver(item: str) -> bool:
+        refs = parse_blocker_refs(item)
+        if not refs:
+            return False
+        for number in refs:
+            if number not in closed_cache:
+                closed_cache[number] = bool(github_client.issue_closed(repo, number))
+            if not closed_cache[number]:
+                return False
+        return True
+
+    return resolver
+
+
+def advance_ready_frontier(
+    config: ProjectConfig,
+    *,
+    dry_run: bool = False,
+    github_client: Any = github,
+) -> list[int]:
+    """Promote `blocked` issues to `ready` the moment every `#N` blocker closes.
+
+    This is what lets waves advance on their own: nobody hand-relabels the
+    next batch once the issues already declare their real blocking edges.
+    """
+    resolver = make_blocker_resolver(github_client, config.repo)
+    promoted: list[int] = []
+    for issue in github_client.issues_with_label(config.repo, "blocked"):
+        validation = validate_ready_issue(issue, blocker_resolver=resolver)
+        if not validation.valid:
+            continue
+        number = int(issue["number"])
+        if not dry_run:
+            github_client.set_state(config.repo, number, "ready", remove=["blocked"])
+        promoted.append(number)
+    return promoted
+
+
+def _issue_scope(issue: dict[str, Any]) -> list[str]:
+    sections = parse_sections(str(issue.get("body") or ""))
+    return list_items(sections.get("files in scope", ""))
+
+
+def claim_all_ready(
+    config: ProjectConfig,
+    *,
+    dry_run: bool = False,
+    github_client: Any = github,
+    lease_func: Any = acquire_treehouse_lease,
+    release_func: Any = release_treehouse_lease,
+    write_entry_func: Any = write_run_entry,
+) -> BatchClaimResult:
+    """Claim every currently-safe `ready` issue - no fixed worker-count cap.
+
+    Concurrency is bounded only by the dependency frontier and file-scope
+    collisions: an undeclared overlap between two ready candidates is rejected
+    to `needs-human` (a slicing problem), same as `claim_next_ready`; a
+    declared or in-flight overlap is serialized instead - claim one this
+    round, leave the other `ready` and unclaimed for the next round once the
+    first integrates.
+    """
+    actions: list[str] = []
+    rejected: list[tuple[int, str, list[str]]] = []
+    deferred: list[int] = []
+    candidates: list[dict[str, Any]] = []
+
+    issues = github_client.ready_issues(config.repo)
+    actions.append(f"read {len(issues)} ready issue(s)")
+
+    for issue in issues:
+        validation = validate_ready_issue(issue)
+        if validation.valid:
+            candidates.append(issue)
+            continue
+        number = int(issue["number"])
+        label = validation.route_label or "needs-human"
+        rejected.append((number, label, validation.reasons))
+        actions.append(f"reject issue #{number}: remove ready, add {label}")
+        if not dry_run:
+            github_client.set_state(config.repo, number, label, remove=["ready"])
+
+    contention = _shared_scope_contention(candidates)
+    survivors: list[dict[str, Any]] = []
+    for issue in candidates:
+        number = int(issue["number"])
+        reasons = contention.get(number, [])
+        if reasons:
+            rejected.append((number, "needs-human", reasons))
+            actions.append(f"reject issue #{number}: remove ready, add needs-human")
+            if not dry_run:
+                github_client.set_state(config.repo, number, "needs-human", remove=["ready"])
+        else:
+            survivors.append(issue)
+
+    claimed_scope: list[str] = []
+    for other in github_client.issues_with_label(config.repo, "in-progress"):
+        claimed_scope.extend(_issue_scope(other))
+
+    claimed: list[ClaimResult] = []
+    for issue in survivors:
+        number = int(issue["number"])
+        scope = _issue_scope(issue)
+        if _scope_overlap(scope, claimed_scope):
+            deferred.append(number)
+            actions.append(
+                f"defer issue #{number}: scope overlaps in-flight or already-claimed work this round"
+            )
+            continue
+
+        actions.append(f"claim issue #{number}: ready -> in-progress")
+        if dry_run:
+            actions.append(f"would acquire treehouse lease for issue #{number}")
+            actions.append(f"would write ledger entry for issue #{number}")
+            claimed.append(ClaimResult(True, number, None, None, [], []))
+            claimed_scope.extend(scope)
+            continue
+
+        github_client.set_state(config.repo, number, "in-progress", remove=["ready"])
+        lease_path: Path | None = None
+        try:
+            lease_path = lease_func(config, number)
+            entry = make_run_entry(config, issue, lease_path)
+            ledger_path = write_entry_func(config, entry)
+            claimed.append(ClaimResult(True, number, lease_path, ledger_path, [], []))
+            claimed_scope.extend(scope)
+        except Exception:
+            if lease_path is not None:
+                release_func(lease_path)
+            github_client.set_state(config.repo, number, "ready", remove=["in-progress"])
+            raise
+
+    return BatchClaimResult(claimed=claimed, deferred=deferred, actions=actions, rejected=rejected)
+
+
 def parse_sections(markdown: str) -> dict[str, str]:
     sections: dict[str, list[str]] = {}
     current: str | None = None
@@ -241,11 +407,17 @@ def _strip_comments(text: str) -> str:
     return re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
 
 
-def _has_non_none_items(text: str) -> bool:
+def _has_non_none_items(text: str, resolver: BlockerResolver | None = None) -> bool:
     items = list_items(text)
     if not items and _meaningful(text):
         items = [text.strip()]
-    return any(_normalize_none(item) not in NONE_WORDS for item in items)
+    for item in items:
+        if _normalize_none(item) in NONE_WORDS:
+            continue
+        if resolver is not None and resolver(item):
+            continue
+        return True
+    return False
 
 
 def _section_is_none(text: str) -> bool:

@@ -91,6 +91,22 @@ If Sandcastle later fits better, treat it as a runner dependency under our state
 
 ---
 
+## D8 - 2026-07-09 re-evaluation: model-agnostic roles, an advisor role, unbounded frontier-based concurrency
+
+**Decision.** Grilled and built four changes together, since each depended on the others holding: (1) every role (implementer, reviewer, advisor) resolves its CLI generically from its configured model, with no role hardcoded to Codex or Claude; (2) the "reviewer must be a different model family" invariant is gone, not relaxed - same-model implement/review is allowed, and the human owns decorrelation consciously at the daily-branch-to-main gate instead, which stays a manual step, not a built lane; (3) a new **advisor** role - an on-demand, bounded consult, not a standing gate - invoked proactively via a structured `advisor_request` field or reactively as a one-time backstop before a task is marked `stuck`; it folds in what used to be a separate "advisory checker" role; (4) `implementers_max` is gone as a fixed worker-count cap - concurrency is bounded only by the dependency frontier (`Blocked by #N` edges, auto-advanced as they close) and file-scope collisions (undeclared overlap -> a human; declared or in-flight overlap -> serialize, don't reject).
+
+**Why.** The user wanted to point different models at different roles without code changes, noticed the pipeline had no "ask a smarter model when stuck" mechanism, and wanted agents to parallelize freely across however many issues are actually safe to run at once rather than a fixed worker count. Cost analysis (current published pricing) confirmed a live LLM-in-the-loop scheduler would run ~$100-500/month for near-zero marginal decision value over deterministic frontier/collision math, so the scheduler itself stayed deterministic; the advisor covers the genuinely hard cases instead, on demand only.
+
+**Spec-authoring dropped as a pipeline role.** `pipeline-spec-author` is deleted. The user's actual practice is a `grilling` session to shape a plan, then the global `to-tickets` skill to publish vertical-slice issues with real blocking edges and a "quiz the user" step - better than the old headless, no-human batch generator, and it's what makes the frontier computable without a hand-written wave-plan. The automated loop's scope now starts at "claim a `ready` issue."
+
+**Skills consolidated.** `pipeline-implementer` wraps the global `implement` skill (overriding only self-review and final-commit, which don't fit a gated pipeline); `pipeline-reviewer` wraps the global `code-review` skill (its Spec/Standards axes cover criteria-correctness and constitution-conformance; test-honesty and routing stay pipeline-specific); `pipeline-advisor` (new, replacing `pipeline-advisory-checker`) leans on `diagnosing-bugs` and `codebase-design` instead of inventing its own method.
+
+**Consequence.** `CONSTITUTION.md`, `PLAN.md`, `ORCHESTRATOR.md`, and `README.md` were rewritten to match: role descriptions are model-agnostic, the per-task loop includes the advisor consult and unbounded claiming, the budget model is windows-per-tool instead of "Codex window / Claude window," and the entry point is `bin/orchestrator run [--poll]` - built, tested, not yet wired into a `launchd` daemon (that's a per-machine setup step). `projects/humanmind.yaml` and the config template gained an `agents.advisor` block and a `windows:` map keyed by tool.
+
+**Reverse.** Set an explicit `tool:` override per role in `projects/<name>.yaml` to pin a CLI regardless of model-name inference. Re-add a per-project `implementers_max` read in `queueing.claim_all_ready` if a hard ceiling is ever wanted again; the deterministic scheduler and the advisor's one-round-trip cap are otherwise unaffected. `pipeline-advisory-checker` and `pipeline-spec-author` are recoverable from git history if a narrower checker role or a headless batch spec-author is ever wanted again.
+
+---
+
 ## What I deliberately did NOT do
 
 - No global symlinks, so no environment change and no session restart needed (D1).
