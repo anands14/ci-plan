@@ -42,10 +42,27 @@ case "$STATE" in
   *) echo "invalid state '$STATE' (expected success|failure|pending|error)" >&2; exit 2 ;;
 esac
 
-# Load the orchestrator token. In unattended mode this token must be injected only
-# into the orchestrator process, never into an agent-readable workspace.
-[ -f "$ENV_FILE" ] && { set -a; . "$ENV_FILE"; set +a; }
+# Load only the orchestrator token. Do not source the whole .env file: it can
+# contain opaque secret values that are not valid shell assignments.
 TOKEN="${!TOKEN_VAR:-}"
+if [ -z "$TOKEN" ] && [ -f "$ENV_FILE" ]; then
+  TOKEN="$(awk -F= -v key="$TOKEN_VAR" '
+    $0 ~ "^[[:space:]]*#" || $0 !~ "=" { next }
+    {
+      raw_key=$1
+      sub("^[[:space:]]*", "", raw_key)
+      sub("[[:space:]]*$", "", raw_key)
+      if (raw_key == key) {
+        sub("^[^=]*=", "")
+        sub("^[[:space:]]*", "")
+        sub("[[:space:]]*$", "")
+        gsub(/^["'\'']|["'\'']$/, "")
+        value=$0
+      }
+    }
+    END { if (value != "") print value }
+  ' "$ENV_FILE")"
+fi
 [ -n "$TOKEN" ] || { echo "no token in \$$TOKEN_VAR (check $ENV_FILE)" >&2; exit 1; }
 
 # Resolve a PR number to its head SHA.

@@ -54,6 +54,7 @@ config_scalar() {
   awk -v key="$key" '
     $0 ~ "^[[:space:]]{2}" key ":" {
       sub("^[^:]+:[[:space:]]*", "")
+      sub("[[:space:]]+#.*$", "")
       gsub(/^["'\'']|["'\'']$/, "")
       print
       found=1
@@ -71,6 +72,7 @@ config_list() {
     in_list && $0 ~ "^[[:space:]]{2}[A-Za-z0-9_-]+:" { exit }
     in_list && $0 ~ "^[[:space:]]*-" {
       sub("^[[:space:]]*-[[:space:]]*", "")
+      sub("[[:space:]]+#.*$", "")
       gsub(/^["'\'']|["'\'']$/, "")
       print
     }

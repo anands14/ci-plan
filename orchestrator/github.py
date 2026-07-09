@@ -93,7 +93,7 @@ def pr_details(repo: str, pr: int) -> dict:
             "view",
             str(pr),
             "--json",
-            "number,title,body,baseRefName,headRefName,headRefOid,isDraft,labels,url",
+            "number,title,body,baseRefName,headRefName,headRefOid,isDraft,labels,url,state,mergedAt,mergeCommit",
         ],
         repo,
     )
@@ -109,10 +109,15 @@ def update_pr_base(repo: str, pr: int, base: str) -> None:
 
 
 def set_pr_labels(repo: str, pr: int, add: str, remove: list[str] | None = None) -> None:
-    args = ["pr", "edit", str(pr), "--add-label", add]
+    _gh(["pr", "edit", str(pr), "--add-label", add], repo)
     for r in remove or []:
-        args += ["--remove-label", r]
-    _gh(args, repo)
+        if r == add:
+            continue
+        try:
+            _gh(["pr", "edit", str(pr), "--remove-label", r], repo)
+        except RuntimeError as exc:
+            if "not found" not in str(exc).lower():
+                raise
 
 
 def pr_checks(repo: str, pr: int) -> tuple[dict[str, str], bool]:
@@ -199,10 +204,16 @@ def branch_checks(repo: str, branch: str) -> tuple[dict[str, str], bool]:
     for run in json.loads(out or "[]"):
         if run.get("headSha") != sha:
             continue
+        run_id = run.get("databaseId")
+        if run_id:
+            jobs_out = _gh(["run", "view", str(run_id), "--json", "jobs"], repo)
+            for job in json.loads(jobs_out or "{}").get("jobs", []):
+                name = job.get("name")
+                if name and name not in checks:
+                    checks[name] = _run_bucket(job)
         name = run.get("name")
-        if not name or name in checks:
-            continue
-        checks[name] = _run_bucket(run)
+        if name and name not in checks:
+            checks[name] = _run_bucket(run)
     green = bool(checks) and all(bucket in {"pass", "skipping"} for bucket in checks.values())
     return checks, green
 

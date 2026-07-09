@@ -189,6 +189,32 @@ def integrate_pr(
         summary = f"would squash-merge PR #{pr_number} into {branch} and run post-merge checks"
         return IntegrationResult(pr_number, entry.issue_number, branch, "planned", summary, False, False, None, None)
 
+    if pr.get("state") == "MERGED":
+        checks = wait_for_branch_checks(
+            config,
+            branch,
+            github_client=github_client,
+            sleeper=sleeper,
+        )
+        if checks.status == "pass":
+            summary = f"integrated PR #{pr_number} into {branch}; post-merge checks passed; closed issue #{entry.issue_number}"
+            _set_pr_label(github_client, config, pr_number, "integrated", remove=["integrating", "integration-failed"])
+            _set_issue_state(github_client, config, entry.issue_number, "integrated")
+            if hasattr(github_client, "close_issue"):
+                github_client.close_issue(config.repo, entry.issue_number, reason="completed")
+            update_run_entry(
+                config,
+                entry,
+                current_step="integrated",
+                integration_branch=branch,
+                integration_status="passed",
+                integration_summary=summary,
+                last_summary=summary,
+            )
+            return IntegrationResult(pr_number, entry.issue_number, branch, "passed", summary, True, False, checks, None)
+        summary = f"already-merged PR #{pr_number} left {branch} checks {checks.status}: {', '.join(checks.reasons)}"
+        return IntegrationResult(pr_number, entry.issue_number, branch, "failed", summary, True, False, checks, None)
+
     _set_pr_label(github_client, config, pr_number, "integrating", remove=["integration-failed", "integrated"])
     update_run_entry(
         config,

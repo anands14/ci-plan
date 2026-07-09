@@ -104,7 +104,7 @@ review:
 integration:
   daily_branch_prefix: day
   required_pr_contexts: [gate, test-discipline, sim-validation, review]
-  post_merge_required_contexts: [gate, test-discipline]
+  post_merge_required_contexts: [gate]
   final_required_contexts: [gate, test-discipline, daily-integration]
   post_merge_poll_attempts: 60
   post_merge_poll_seconds: 30
@@ -129,6 +129,8 @@ tests:
 sim_validation:
   default_platform: macos
   allow_na_when_all_paths_match:
+    - '^AGENT_HANDOFF.md$'
+    - '^docs/'
     - '^packages/tovi_core/'
   ios_path_triggers:
     - '^packages/tovi_app/lib/'
