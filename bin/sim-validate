@@ -15,7 +15,7 @@ BASE="origin/main"
 SHA="" PR="" PLATFORM="" DRY=0 POST=0
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-PROJECT_CONFIG="$ROOT/projects/humanmind.yaml"
+PROJECT_CONFIG="$ROOT/projects/tovi.yaml"
 WORKTREE=""
 TARGET_SHA=""
 

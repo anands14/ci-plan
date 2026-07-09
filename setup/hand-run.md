@@ -41,7 +41,7 @@ It produced PR [#8](https://github.com/anands14/tovi/pull/8), which is routed `a
    ```sh
    gh issue list --label ready
    gh issue edit <n> --add-label in-progress --remove-label ready
-   bin/orchestrator ensure-daily-branch --project humanmind
+   bin/orchestrator ensure-daily-branch --project tovi
    git checkout -b feat/<slug> origin/day/$(date +%F)      # or: treehouse get --lease
    ```
 
@@ -80,7 +80,7 @@ It produced PR [#8](https://github.com/anands14/tovi/pull/8), which is routed `a
 
 7. **Daily integration.** Only when all required agent-PR contexts are green.
    ```sh
-   bin/orchestrator integrate-pr --project humanmind --issue <issue> --pr <N>
+   bin/orchestrator integrate-pr --project tovi --issue <issue> --pr <N>
    ```
    This squash-merges the PR into `day/YYYY-MM-DD`, runs the post-merge branch checks, and reverts that PR if the daily branch turns red.
    When the checks pass, the orchestrator marks the task `integrated` and closes the GitHub issue as completed.
@@ -88,7 +88,7 @@ It produced PR [#8](https://github.com/anands14/tovi/pull/8), which is routed `a
 
 8. **Final daily PR.** At the end of the day, raise or update one PR from the daily branch to `main`.
    ```sh
-   bin/orchestrator open-daily-pr --project humanmind --post
+   bin/orchestrator open-daily-pr --project tovi --post
    bin/merge <daily-pr>                   # refuses unless this is day/* -> main and final checks are green
    ```
 

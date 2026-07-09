@@ -113,6 +113,35 @@ class ReadyValidationTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertEqual(result.route_label, "blocked")
 
+    def test_accepts_what_to_build_as_a_goal_alias(self):
+        body = VALID_BODY.replace("## Goal", "## What to build")
+
+        result = validate_ready_issue({"body": body})
+
+        self.assertTrue(result.valid)
+
+    def test_accepts_blocked_by_as_a_dependencies_alias(self):
+        body = VALID_BODY.replace(
+            "## Dependencies / blockers\n\n- None", "## Blocked by\n\n- None"
+        )
+
+        result = validate_ready_issue({"body": body})
+
+        self.assertTrue(result.valid)
+
+    def test_accepts_none_can_start_immediately_prose_as_unblocked(self):
+        # The exact phrasing the global `to-tickets` skill suggests, and what
+        # real Tovi issues use: plain prose, no leading "-", trailing
+        # explanation after "None".
+        body = VALID_BODY.replace(
+            "## Dependencies / blockers\n\n- None",
+            "## Blocked by\n\nNone - can start immediately.",
+        )
+
+        result = validate_ready_issue({"body": body})
+
+        self.assertTrue(result.valid)
+
     def test_rejects_unlabeled_acceptance_criterion(self):
         body = VALID_BODY.replace(
             "- [ ] (unit) `A` returns `B`",

@@ -6,23 +6,23 @@
 #   See ../Tovi/docs/CONSTITUTION.md for the full architecture and rationale.
 
 project:
-  name: humanmind
+  name: tovi
   repo: anands14/tovi                 # GitHub repo; origin remote verified 2026-06-28
   default_branch: main
   local_path: ../Tovi                 # the Tovi app repo (sibling of this framework repo)
   agent_remote: agent                 # Local alias to the no-mistakes gate remote; workers never push origin
 
-# Path inside the HumanMind repo to its own project constitution.
+# Path inside the Tovi repo to its own project constitution.
 constitution: docs/CONSTITUTION.md
 
 agents:
   implementer:
+    model: claude-sonnet-5             # tool inferred: claude
+    effort: max
+  reviewer:
     model: gpt-5.5                    # tool inferred: codex
     effort: high
-  reviewer:
-    model: claude-opus-4-8            # tool inferred: claude
-    effort: max
-    fallback_model: gpt-5.5           # tool inferred: codex
+    fallback_model: claude-opus-4-8   # tool inferred: claude
     fallback_effort: xhigh
   advisor:
     model: claude-opus-4-8            # on-demand consult, not a gate
@@ -60,9 +60,9 @@ triggers:
   mode: event-wake-plus-poll
   poll_interval_seconds: 300
   github_issue_events: [labeled, reopened, edited]
-  wake_command: orchestrator wake --project humanmind
+  wake_command: orchestrator wake --project tovi
 
-# Gate commands. Mirror these in the HumanMind repo's .no-mistakes.yaml.
+# Gate commands. Mirror these in the Tovi repo's .no-mistakes.yaml.
 # melos orchestrates the core/app/agent packages from the repo root.
 gate:
   no_mistakes_config: .no-mistakes.yaml

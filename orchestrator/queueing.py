@@ -24,14 +24,20 @@ LIFECYCLE_LABELS = [
     "stuck",
 ]
 REQUIRED_SECTIONS = {
-    "goal": "Goal",
     "acceptance criteria": "Acceptance criteria",
     "files in scope": "Files in scope",
     "out of scope": "Out of scope",
-    "dependencies / blockers": "Dependencies / blockers",
     "risk flags": "Risk flags",
     "size estimate": "Size estimate",
 }
+# Two sections overlap with the global `to-tickets` skill's own issue template
+# (which this pipeline's spec-authoring now runs through), under different
+# names than this framework originally used. Accept either spelling rather
+# than forcing every issue through a rename.
+GOAL_SECTION_ALIASES = ("goal", "what to build")
+GOAL_SECTION_LABEL = "Goal"
+BLOCKER_SECTION_ALIASES = ("dependencies / blockers", "blocked by")
+BLOCKER_SECTION_LABEL = "Dependencies / blockers"
 TEST_LEVELS = {
     "unit",
     "widget",
@@ -96,6 +102,8 @@ def validate_ready_issue(
     sections = parse_sections(body)
     reasons: list[str] = []
 
+    if not _meaningful(_first_present(sections, GOAL_SECTION_ALIASES)):
+        reasons.append(f"missing or empty section: {GOAL_SECTION_LABEL}")
     for key, label in REQUIRED_SECTIONS.items():
         if not _meaningful(sections.get(key, "")):
             reasons.append(f"missing or empty section: {label}")
@@ -121,7 +129,7 @@ def validate_ready_issue(
         if "priority" not in size.lower():
             reasons.append("size estimate must include priority")
 
-    dependencies = sections.get("dependencies / blockers", "")
+    dependencies = _first_present(sections, BLOCKER_SECTION_ALIASES)
     has_blockers = _has_non_none_items(dependencies, blocker_resolver)
     if has_blockers:
         reasons.append("dependencies or blockers are not clear")
@@ -391,6 +399,14 @@ def list_items(text: str) -> list[str]:
     return items
 
 
+def _first_present(sections: dict[str, str], aliases: tuple[str, ...]) -> str:
+    for key in aliases:
+        value = sections.get(key, "")
+        if _meaningful(value):
+            return value
+    return ""
+
+
 def _meaningful(text: str) -> bool:
     stripped = _strip_comments(text).strip()
     if not stripped:
@@ -412,7 +428,7 @@ def _has_non_none_items(text: str, resolver: BlockerResolver | None = None) -> b
     if not items and _meaningful(text):
         items = [text.strip()]
     for item in items:
-        if _normalize_none(item) in NONE_WORDS:
+        if _is_none_item(item):
             continue
         if resolver is not None and resolver(item):
             continue
@@ -424,7 +440,22 @@ def _section_is_none(text: str) -> bool:
     items = list_items(text)
     if not items and _meaningful(text):
         items = [text.strip()]
-    return bool(items) and all(_normalize_none(item) in NONE_WORDS for item in items)
+    return bool(items) and all(_is_none_item(item) for item in items)
+
+
+def _is_none_item(text: str) -> bool:
+    """True for "None", and also for "None - can start immediately" style
+    prose (the phrasing the global `to-tickets` skill itself suggests) - a
+    none-word followed by trailing explanation is still "none", not a real
+    blocker.
+    """
+    normalized = _normalize_none(text)
+    for word in NONE_WORDS:
+        if normalized == word:
+            return True
+        if normalized.startswith(word) and normalized[len(word) : len(word) + 1] in (" ", "-", ":"):
+            return True
+    return False
 
 
 def _normalize_none(text: str) -> str:

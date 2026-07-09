@@ -29,10 +29,10 @@ The bridge between the framework and a target repo is a **per-project config fil
 Entry points:
 
 ```sh
-bin/orchestrator preflight --project humanmind
-bin/orchestrator run --project humanmind          # one full tick: frontier -> claim-all -> pipeline -> integrate
-bin/orchestrator run --project humanmind --poll    # loop until there's nothing left to do
-bin/orchestrator open-daily-pr --project humanmind --post
+bin/orchestrator preflight --project tovi
+bin/orchestrator run --project tovi          # one full tick: frontier -> claim-all -> pipeline -> integrate
+bin/orchestrator run --project tovi --poll    # loop until there's nothing left to do
+bin/orchestrator open-daily-pr --project tovi --post
 ```
 
 `bin/orchestrator run` is what "start the automated process" means in this framework - not a chat request to an interactive coding session (see the repo-root `AGENTS.md` for why, and what to do instead if that's what you were about to do).
